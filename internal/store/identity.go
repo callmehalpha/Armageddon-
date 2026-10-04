@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 )
 
 type User struct {
@@ -221,6 +222,15 @@ func (s *Store) PairingByID(id string) (*Pairing, error) {
 // ApprovePairing creates the device and links it to the pairing atomically.
 func (s *Store) ApprovePairing(p *Pairing, userID, deviceID string, now int64) error {
 	return s.Tx(context.Background(), func(tx *sql.Tx) error {
+		// Device first: device_pairings.device_id references it and SQLite
+		// checks foreign keys immediately.
+		if _, err := tx.Exec(`INSERT INTO devices (id, user_id, name, platform, public_key, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			deviceID, userID, p.Name, p.Platform, p.PublicKey, now, now); err != nil {
+			if strings.Contains(err.Error(), "UNIQUE") {
+				return errors.New("this device key is already paired")
+			}
+			return err
+		}
 		res, err := tx.Exec(`UPDATE device_pairings SET approved_by = ?, approved_at = ?, device_id = ? WHERE id = ? AND approved_at IS NULL AND expires_at > ?`,
 			userID, now, deviceID, p.ID, now)
 		if err != nil {
@@ -229,9 +239,7 @@ func (s *Store) ApprovePairing(p *Pairing, userID, deviceID string, now int64) e
 		if n, _ := res.RowsAffected(); n != 1 {
 			return errors.New("pairing expired or already approved")
 		}
-		_, err = tx.Exec(`INSERT INTO devices (id, user_id, name, platform, public_key, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			deviceID, userID, p.Name, p.Platform, p.PublicKey, now, now)
-		return err
+		return nil
 	})
 }
 

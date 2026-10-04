@@ -71,3 +71,22 @@ func TestCheckpointCAS(t *testing.T) {
 		t.Fatalf("non-member must get ErrNotFound, got %v", err)
 	}
 }
+
+func TestApprovePairing(t *testing.T) {
+	s := open(t)
+	now := Now()
+	s.CreateUser(&User{ID: "u", Username: "u", PasswordHash: "x", Role: "admin", CreatedAt: now})
+	p := &Pairing{ID: "p", UserCodeHash: "c", PollSecretHash: "s", PublicKey: "k", Name: "laptop", ExpiresAt: now + 60000}
+	if err := s.CreatePairing(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ApprovePairing(p, "u", "d1", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ApprovePairing(p, "u", "d2", now); err == nil {
+		t.Fatal("second approval must fail")
+	}
+	if got, _ := s.PairingByID("p"); got.DeviceID != "d1" {
+		t.Fatalf("pairing device = %q", got.DeviceID)
+	}
+}

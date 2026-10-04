@@ -42,9 +42,10 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	// One connection: SQLite has a single writer anyway, and serialising here
-	// keeps authority transactions simple. Revisit with PostgreSQL.
-	db.SetMaxOpenConns(1)
+	// WAL allows concurrent readers; writers serialise on BEGIN IMMEDIATE
+	// (_txlock) with busy_timeout. Code inside Store.Tx must use the tx, never
+	// s.db, or it can wait on its own write lock.
+	db.SetMaxOpenConns(8)
 	s := &Store{db: db, path: path}
 	if err := s.migrate(); err != nil {
 		db.Close()

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/callmehalpha/Armageddon-/internal/config"
@@ -34,6 +35,11 @@ type Server struct {
 
 // New opens the data directory and prepares the server. It does not listen.
 func New(cfg *config.Server) (*Server, error) {
+	// Everything the server creates is private by default (the database, its
+	// WAL and backups, keys). Paths workspace users need are chmod-ed
+	// explicitly. Found by the acceptance test: without this the SQLite file
+	// was 0644 and readable by workspace users.
+	syscall.Umask(0o077)
 	st, err := store.Open(filepath.Join(cfg.DataDir, "armageddon.db"))
 	if err != nil {
 		return nil, err
@@ -59,7 +65,12 @@ func (s *Server) installHookBinary() error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	os.Chmod(s.cfg.DataDir, 0o755) // workspace users must traverse to their own directories
+	// Workspace users must traverse to their own directories and run hooks.
+	for _, d := range []string{s.cfg.DataDir, dir} {
+		if err := os.Chmod(d, 0o755); err != nil {
+			return err
+		}
+	}
 	dst := filepath.Join(dir, "armageddon")
 	in, err := os.Open(self)
 	if err != nil {
@@ -77,6 +88,9 @@ func (s *Server) installHookBinary() error {
 	}
 	out.Close()
 	s.hookBin = dst
+	if err := os.Chmod(tmp, 0o755); err != nil {
+		return err
+	}
 	return os.Rename(tmp, dst)
 }
 
@@ -85,6 +99,8 @@ func (s *Server) Run(ctx context.Context) error {
 	s.ctx = ctx
 	if !sysuser.Isolated() {
 		log.Printf("WARNING: not running as root: workspace processes run as the server's own user (no isolation, development mode)")
+	} else if err := checkTraversable(s.cfg.DataDir); err != nil {
+		return err
 	}
 	if err := s.ensureSetupToken(); err != nil {
 		return err
@@ -148,6 +164,27 @@ func (s *Server) ensureSetupToken() error {
 	}
 	fmt.Printf("\n  No users yet. Create the first admin within 1 hour at:\n\n    %s/setup?token=%s\n\n", s.cfg.PublicURL, tok)
 	return nil
+}
+
+// checkTraversable makes sure workspace users can reach their directories:
+// every ancestor of the data directory must be searchable by others.
+func checkTraversable(dir string) error {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	for d := filepath.Dir(abs); ; d = filepath.Dir(d) {
+		fi, err := os.Stat(d)
+		if err != nil {
+			return err
+		}
+		if fi.Mode().Perm()&0o001 == 0 {
+			return fmt.Errorf("data directory %s is unusable: workspace users cannot traverse %s (mode %v). Use a path such as /var/lib/armageddon, or chmod o+x %s", abs, d, fi.Mode().Perm(), d)
+		}
+		if d == "/" || d == "." {
+			return nil
+		}
+	}
 }
 
 // event records an audit event; failures are logged, not fatal.

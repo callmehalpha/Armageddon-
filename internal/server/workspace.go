@@ -203,6 +203,12 @@ func (s *Server) importWorkspace(w *store.Workspace, owner *store.User) error {
 	if err := os.MkdirAll(p.Root, 0o755); err != nil {
 		return err
 	}
+	// The server's umask is 077; these two must stay traversable.
+	for _, d := range []string{filepath.Dir(p.Root), p.Root} {
+		if err := os.Chmod(d, 0o755); err != nil {
+			return err
+		}
+	}
 	for _, d := range []string{p.Home, p.SeatDir} {
 		if err := a.MkdirOwned(d, 0o700); err != nil {
 			return err
@@ -274,6 +280,11 @@ func (s *Server) importWorkspace(w *store.Workspace, owner *store.User) error {
 	if err := gitshadow.Init(p.SeatShadow, rt.seat.Prepare); err != nil {
 		return fmt.Errorf("seat shadow: %w", err)
 	}
+	// Init writes info/attributes and info/exclude itself; the workspace
+	// user must own them (they carry the byte-exact capture settings).
+	if err := a.Chown(p.SeatShadow); err != nil {
+		return err
+	}
 	if err := gitshadow.Init(p.Checkpoints, nil); err != nil {
 		return fmt.Errorf("checkpoints repo: %w", err)
 	}
@@ -302,9 +313,16 @@ func (s *Server) writeHooks(rt *runtime) error {
 	if err := os.MkdirAll(rt.p.Hooks, 0o755); err != nil {
 		return err
 	}
+	if err := os.Chmod(rt.p.Hooks, 0o755); err != nil {
+		return err
+	}
 	for _, h := range []string{"post-receive", "reference-transaction"} {
 		script := fmt.Sprintf("#!/bin/sh\nexec %q hook %s \"$@\"\n", s.hookBin, h)
-		if err := os.WriteFile(filepath.Join(rt.p.Hooks, h), []byte(script), 0o755); err != nil {
+		f := filepath.Join(rt.p.Hooks, h)
+		if err := os.WriteFile(f, []byte(script), 0o755); err != nil {
+			return err
+		}
+		if err := os.Chmod(f, 0o755); err != nil {
 			return err
 		}
 	}
@@ -402,7 +420,7 @@ func (s *Server) commitCheckpoint(rt *runtime, epoch int64, authorKind, authorDe
 	}
 	var seq int64
 	err = s.store.Tx(context.Background(), func(tx *sql.Tx) error {
-		if existing, err := s.store.CheckpointByID(rt.id, cp); err == nil {
+		if existing, err := s.store.CheckpointByIDTx(tx, rt.id, cp); err == nil {
 			seq = existing.Seq // idempotent retry
 			return nil
 		}

@@ -212,6 +212,11 @@ func (s *Store) CheckpointByID(wsID, id string) (*Checkpoint, error) {
 	return scanCP(s.db.QueryRow(`SELECT `+cpCols+` FROM checkpoints WHERE workspace_id = ? AND id = ?`, wsID, id))
 }
 
+// CheckpointByIDTx is CheckpointByID inside a transaction.
+func (s *Store) CheckpointByIDTx(tx *sql.Tx, wsID, id string) (*Checkpoint, error) {
+	return scanCP(tx.QueryRow(`SELECT `+cpCols+` FROM checkpoints WHERE workspace_id = ? AND id = ?`, wsID, id))
+}
+
 func (s *Store) CheckpointBySeq(wsID string, seq int64) (*Checkpoint, error) {
 	return scanCP(s.db.QueryRow(`SELECT `+cpCols+` FROM checkpoints WHERE workspace_id = ? AND seq = ?`, wsID, seq))
 }

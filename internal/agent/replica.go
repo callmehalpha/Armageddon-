@@ -159,7 +159,14 @@ func (c *Client) Clone(ref, dir string, out io.Writer) error {
 		if _, err := os.Stat(st.Path); err == nil {
 			return fmt.Errorf("this device already has a replica of %s at %s", w.Name, st.Path)
 		}
-		os.RemoveAll(replicaDir(w.ID)) // stale state from a deleted replica
+		// Stale state from a deleted replica; refuse while a follower of the
+		// old replica is still running.
+		lk, err := lockReplica(w.ID)
+		if err != nil {
+			return err
+		}
+		lk.release()
+		os.RemoveAll(replicaDir(w.ID))
 	}
 	fmt.Fprintf(out, "Cloning %s into %s…\n", w.Name, abs)
 	if _, err := c.git(filepath.Dir(abs), "clone", "-q", "--origin", "armageddon", w.GitURL, abs); err != nil {
@@ -170,9 +177,11 @@ func (c *Client) Clone(ref, dir string, out io.Writer) error {
 	if _, err := c.git(abs, "config", "credential."+strings.TrimSuffix(w.GitURL, "/")+".helper", "!"+shellQuote(self)+" git-credential"); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(replicaDir(w.ID), 0o700); err != nil {
+	lk, err := lockReplica(w.ID)
+	if err != nil {
 		return err
 	}
+	defer lk.release()
 	sh := shadowFor(w.ID, abs)
 	if err := gitshadow.Init(sh.GitDir, nil); err != nil {
 		return err
@@ -250,6 +259,11 @@ func FindReplica(dir string) (string, error) {
 
 // Follow keeps the replica current until ctx ends (§3.3 FOLLOWING).
 func (c *Client) Follow(ctx context.Context, wsID string, out io.Writer) error {
+	lk, err := lockReplica(wsID)
+	if err != nil {
+		return err
+	}
+	defer lk.release()
 	st, err := loadState(wsID)
 	if err != nil {
 		return err
@@ -375,6 +389,14 @@ func (c *Client) Status(wsID string, out io.Writer) error {
 	} else {
 		fmt.Fprintf(out, "server:      unreachable (%v)\n", err)
 	}
+	lk, err := lockReplica(wsID)
+	if errors.Is(err, errBusy) {
+		fmt.Fprintln(out, "local:       a follower is running (dirty check skipped)")
+		return nil
+	} else if err != nil {
+		return err
+	}
+	defer lk.release()
 	if st.AppliedOid != "" {
 		state, err := sh.CaptureState()
 		prev, err2 := sh.StateOf(st.AppliedOid)
