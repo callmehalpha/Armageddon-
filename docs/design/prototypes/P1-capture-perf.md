@@ -1,6 +1,6 @@
 # P1: Capture performance
 
-**Verdict: PASS at 5k and 50k files. FAIL at 200k with full-tree capture, __SCOPED_VERDICT__ with watcher-scoped capture. FAIL on the storage-growth criterion as worded, which was the wrong metric; a replacement is proposed below.** P1 also found the most important transport bug of Phase 0: stock `git fetch` resends the whole tree for every checkpoint.
+**Verdict: PASS at 5k and 50k files. FAIL at 200k with full-tree capture, **a marginal pass (896 ms p95 against a 1 s target)** with watcher-scoped capture. FAIL on the storage-growth criterion as worded, which was the wrong metric; a replacement is proposed below.** P1 also found the most important transport bug of Phase 0: stock `git fetch` resends the whole tree for every checkpoint.
 
 Code: [`prototypes/p1-capture-perf`](../../../prototypes/p1-capture-perf/main.go), using [`internal/gitshadow`](../../../prototypes/internal/gitshadow/gitshadow.go).
 
@@ -59,7 +59,20 @@ Packing `new --not <receiver's base checkpoint>^{tree}` instead sends only the c
 
 Full capture is inherently O(tree) because of the three directory walks. Scoping capture to the paths the watcher reports (`add -A -- <paths>`, plus `ls-files` limited to their directories, plus an incremental empty-directory set) removes those walks:
 
-__SCOPED_TABLE__
+| Files changed | 50k full | 50k scoped | 200k full | 200k scoped |
+|---------------|---------:|-----------:|----------:|------------:|
+| 1 | 232 / 251 ms | 167 / 185 ms | 1079 / 1142 ms | 750 / 811 ms |
+| 20 | 244 / 286 ms | **202 / 218 ms** | 1098 / 1233 ms | **836 / 896 ms** |
+| 200 | 349 / 390 ms | 471 / 515 ms | 1246 / 1330 ms | 1576 / 1748 ms |
+
+Cells show p50 / p95, n=20. Every scoped capture was cross-checked against a full capture right after it: **0 mismatches in 120 comparisons**.
+
+Scoped capture saves only about 25–30% for small changes, and it is *slower* for 200 changed files, because `ls-files` with many pathspecs is expensive. The remaining floor is that every capture reads and rewrites the whole index: at 200k entries, `add` and `write-tree` each touch a ~15 MB index. So:
+
+- Use scoped capture for change sets up to ~50 paths, and full capture above that.
+- At 200k+ files, sub-second capture is marginal with Git as the capture engine.
+
+If large monorepos become a target, the next step is a split index (`core.splitIndex`, untested) or an in-process index writer. Neither is needed for v0.1.
 
 **Proposed (§6.3):** the agent and the server seat use watcher-scoped capture. A full capture runs as a backstop: on watcher overflow, on startup, every N minutes, and before any lease flush. Scoped capture is correct only if the watcher misses nothing, which is P3's question. So scoped capture stays behind a flag until P3 passes, and full capture remains the default.
 

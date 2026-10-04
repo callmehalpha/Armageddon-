@@ -18,15 +18,17 @@ package main
 
 import (
 	"bufio"
+	"compress/gzip"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"log"
 	mrand "math/rand"
 	"net"
 	"net/http"
-	"net/http/cgi"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -111,7 +113,7 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	}
 	isReceive := service == "git-receive-pack"
 
-	env := []string{"GIT_HTTP_EXPORT_ALL=1", "GIT_PROJECT_ROOT=" + w.Root}
+	var env []string
 	switch {
 	case s.plain:
 	case kind == "git" && repo == "repo.git":
@@ -169,7 +171,6 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 			{"receive.denyCurrentBranch", "ignore"},
 			{"receive.fsckObjects", "true"},
 			{"receive.advertisePushOptions", "false"},
-			{"http.receivepack", "true"},
 			{"uploadpack.allowAnySHA1InWant", "false"},
 		}
 		env = append(env, fmt.Sprintf("GIT_CONFIG_COUNT=%d", len(cfg)))
@@ -179,13 +180,60 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		env = append(env, "ARMAGEDDON_SOCK="+w.Sock, "ARMAGEDDON_WS="+w.ID, "ARMAGEDDON_PUSH=1",
 			"ARMAGEDDON_INTERNAL_URL=http://"+s.addr+"/internal/"+w.ID+"/checkpoints.git",
 			"ARMAGEDDON_HOOK_TOKEN="+w.HookToken, "ARMAGEDDON_BIN="+s.self)
-	} else {
-		env = append(env, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.receivepack", "GIT_CONFIG_VALUE_0=true")
 	}
-	h := &cgi.Handler{Path: "/usr/bin/env", Args: []string{"git", "http-backend"}, Env: env,
-		InheritEnv: []string{"PATH", "HOME"}}
-	r.URL.Path = "/" + repo + "/" + rest
-	h.ServeHTTP(rw, r)
+	serveSmartHTTP(rw, r, filepath.Join(w.Root, repo), service, rest, env)
+}
+
+// serveSmartHTTP implements Git's smart HTTP protocol (v0/v1) by spawning
+// `git upload-pack|receive-pack --stateless-rpc` directly. Go's net/http/cgi
+// cannot be used: it rejects chunked request bodies with 400, and git sends
+// every push larger than http.postBuffer (1 MiB) chunked.
+func serveSmartHTTP(rw http.ResponseWriter, r *http.Request, repoPath, service, rest string, env []string) {
+	if service != "git-upload-pack" && service != "git-receive-pack" {
+		http.Error(rw, "unsupported service", http.StatusForbidden)
+		return
+	}
+	sub := strings.TrimPrefix(service, "git-")
+	base := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}
+	switch {
+	case r.Method == http.MethodGet && rest == "info/refs":
+		cmd := exec.Command("git", sub, "--stateless-rpc", "--advertise-refs", repoPath)
+		cmd.Env = append(base, env...)
+		out, err := cmd.Output()
+		if err != nil {
+			http.Error(rw, "advertise failed", http.StatusInternalServerError)
+			return
+		}
+		rw.Header().Set("Content-Type", "application/x-"+service+"-advertisement")
+		rw.Header().Set("Cache-Control", "no-cache")
+		hdr := "# service=" + service + "\n"
+		fmt.Fprintf(rw, "%04x%s0000", len(hdr)+4, hdr)
+		rw.Write(out)
+	case r.Method == http.MethodPost && rest == service:
+		var body io.Reader = r.Body
+		if r.Header.Get("Content-Encoding") == "gzip" {
+			gz, err := gzip.NewReader(r.Body)
+			if err != nil {
+				http.Error(rw, "bad gzip", http.StatusBadRequest)
+				return
+			}
+			defer gz.Close()
+			body = gz
+		}
+		cmd := exec.Command("git", sub, "--stateless-rpc", repoPath)
+		cmd.Env = append(base, env...)
+		cmd.Stdin = body
+		rw.Header().Set("Content-Type", "application/x-"+service+"-result")
+		rw.Header().Set("Cache-Control", "no-cache")
+		cmd.Stdout = rw
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			log.Printf("%s %s: %v %s", sub, repoPath, err, stderr.String())
+		}
+	default:
+		http.NotFound(rw, r)
+	}
 }
 
 // Authority callbacks from hooks (unix socket, one JSON request per conn).
@@ -416,12 +464,16 @@ func try(dir string, env []string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
+// Unix socket paths are limited to 108 bytes, so sockets live in a short
+// temporary directory rather than under the (long) work directory.
+var sockDir, _ = os.MkdirTemp("", "p5s")
+
 func newWorkspace(base, id, self, addr string) *Workspace {
 	root := filepath.Join(base, id)
 	os.RemoveAll(root)
 	w := &Workspace{ID: id, Root: root, RepoGit: filepath.Join(root, "repo.git"),
 		CheckpointsGit: filepath.Join(root, "checkpoints.git"), Tree: filepath.Join(root, "tree"),
-		HooksDir: filepath.Join(root, "hooks"), Sock: filepath.Join(root, "authority.sock"),
+		HooksDir: filepath.Join(root, "hooks"), Sock: filepath.Join(sockDir, id+".sock"),
 		holder: "server", epoch: 1}
 	tok := make([]byte, 16)
 	rand.Read(tok)
@@ -431,8 +483,6 @@ func newWorkspace(base, id, self, addr string) *Workspace {
 	run(base, nil, "init", "-q", "--bare", w.CheckpointsGit)
 	run(w.RepoGit, nil, "config", "core.logAllRefUpdates", "always")
 	run(w.RepoGit, nil, "config", "gc.auto", "0")
-	// Server-seat local git uses the same server-owned hooks directory.
-	run(w.RepoGit, nil, "config", "core.hooksPath", w.HooksDir)
 	cpHooks := filepath.Join(root, "cp-hooks")
 	w.CpHooksDir = cpHooks
 	os.MkdirAll(cpHooks, 0o755)
@@ -459,6 +509,9 @@ func newWorkspace(base, id, self, addr string) *Workspace {
 	run(seed, gitIdent, "commit", "-q", "-m", "seed")
 	run(seed, nil, "push", "-q", w.RepoGit, "main", "main:feature", "main:feature2")
 	run(w.RepoGit, nil, "worktree", "add", "-q", w.Tree, "main")
+	// Server-seat local git uses the same server-owned hooks directory
+	// (installed after seeding so the seed push needs no authority).
+	run(w.RepoGit, nil, "config", "core.hooksPath", w.HooksDir)
 	if err := w.serveSocket(); err != nil {
 		panic(err)
 	}
@@ -697,7 +750,10 @@ func fence(base string, w *Workspace, d1 string, push func(string, int, ...strin
 	}
 	done := make(chan res)
 	go func() {
-		_, err := push(d1, epoch, "-q", "origin", "main")
+		out, err := push(d1, epoch, "-q", "origin", "main")
+		if err != nil {
+			fmt.Println("    S11 push output:", out)
+		}
 		done <- res{time.Now(), err}
 	}()
 	// Wait until the receive-pack POST is in flight, then take over.
@@ -743,8 +799,13 @@ func throughput(base, addr string, srv *Server, w *Workspace, mb, reps int) {
 	plainWS := newWorkspace(base, "plain", srv.self, addr)
 	fullWS := newWorkspace(base, "full", srv.self, addr)
 	run(plainWS.RepoGit, nil, "config", "--unset", "core.hooksPath") // baseline: stock http-backend, no hooks
+	run(plainWS.RepoGit, nil, "config", "receive.denyCurrentBranch", "ignore")
 	run(src, nil, "push", "-q", "--force", plainWS.RepoGit, "main")
+	// Setup only: load the history without going through the authority hook.
+	run(fullWS.RepoGit, nil, "config", "--unset", "core.hooksPath")
+	run(fullWS.RepoGit, nil, "config", "receive.denyCurrentBranch", "ignore")
 	run(src, nil, "push", "-q", "--force", fullWS.RepoGit, "main")
+	run(fullWS.RepoGit, nil, "config", "core.hooksPath", fullWS.HooksDir)
 	run(plainWS.RepoGit, nil, "repack", "-adq")
 	run(fullWS.RepoGit, nil, "repack", "-adq")
 
@@ -809,7 +870,7 @@ func throughput(base, addr string, srv *Server, w *Workspace, mb, reps int) {
 	}
 	cloneOverhead := float64(med(fc))/float64(med(pc)) - 1
 	pushOverhead := float64(med(fp))/float64(med(pp)) - 1
-	check("S12 clone throughput within 20% of plain git http-backend", cloneOverhead < 0.20,
+	check("S12 clone throughput within 20% of baseline (same front end, no auth/hooks/fence)", cloneOverhead < 0.20,
 		"repo %s: plain %s vs armageddon %s (%+.1f%%), median of %d", packSize, med(pc).Round(time.Millisecond), med(fc).Round(time.Millisecond), 100*cloneOverhead, reps)
 	check("S12b push throughput (lease holder) within 20% of plain", pushOverhead < 0.20,
 		"%d MiB push: plain %s vs armageddon %s (%+.1f%%; includes hook + authority callback)", mb/3, med(pp).Round(time.Millisecond), med(fp).Round(time.Millisecond), 100*pushOverhead)

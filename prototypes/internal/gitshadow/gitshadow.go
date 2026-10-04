@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -794,7 +795,9 @@ func fileState(p, oldMode, oldOid, newMode, newOid string) (int, error) {
 // it, computed in-process (no subprocess per file).
 func DiskBlob(p string) (string, string, error) {
 	fi, err := os.Lstat(p)
-	if errors.Is(err, os.ErrNotExist) {
+	// ENOTDIR: a parent component is now a file (a directory became a file
+	// before a crash), so this path does not exist either.
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
 		return "000000", "", nil
 	}
 	if err != nil {
