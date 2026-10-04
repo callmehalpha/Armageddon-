@@ -6,6 +6,7 @@
 // The server must be running; the setup URL is the one it printed.
 import { createRequire } from "node:module";
 import { mkdirSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 // CommonJS require honours NODE_PATH, so a globally installed playwright works.
 const { chromium } = createRequire(import.meta.url)("playwright");
 
@@ -25,7 +26,8 @@ page.on("console", (m) => { if (m.type() === "error") errors.push(m.text()); });
 // 1. setup
 await page.goto(setupURL);
 await page.fill('input[name="username"]', "abdul");
-await page.fill('input[name="password"]', "correct-horse-9");
+// Throwaway password for the throwaway server under test.
+await page.fill('input[name="password"]', randomBytes(18).toString("base64url"));
 await page.screenshot({ path: `${shots}/1-setup.png` });
 await page.click('button[type="submit"]');
 await page.waitForSelector("text=Workspaces");
@@ -41,8 +43,12 @@ pass("workspace created and opened");
 await page.waitForTimeout(800);
 await page.click("#term");
 await page.keyboard.type("echo hello-from-the-browser > browser.txt && git status --short && whoami\n");
-await page.waitForFunction(() => document.querySelector("#term")?.innerText.includes("browser.txt"), null, { timeout: 15000 })
-  .catch(() => fail("terminal did not show git status output"));
+// Wait for the command's output, not its echo: "?? browser.txt" comes from
+// git status and the user name from whoami.
+await page.waitForFunction(() => {
+  const t = document.querySelector("#term")?.innerText || "";
+  return t.includes("?? browser.txt") && /\nws-[a-z0-9]{6,}/.test(t);
+}, null, { timeout: 15000 }).catch(() => fail("terminal did not show the git status and whoami output"));
 pass("terminal runs commands (git status shows the new file)");
 const text = await page.locator("#term").innerText();
 if (!/ws-[a-z0-9]+/.test(text)) fail("terminal is not running as the workspace user:\n" + text);

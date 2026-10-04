@@ -23,6 +23,8 @@ DATA=$ROOT/server
 LAPTOP=$ROOT/laptop
 export ARMAGEDDON_CONFIG_DIR=$LAPTOP/config ARMAGEDDON_DATA_DIR=$LAPTOP/data
 SOURCE_URL=${SOURCE_URL:-https://github.com/octocat/Hello-World.git}
+# Throwaway credentials for the throwaway server this test creates.
+ADMIN_PW=$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')
 
 pass() { printf '\033[32mPASS\033[0m %s\n' "$*"; }
 # check DESCRIPTION CMD...: a failed check always aborts (plain `cmd && pass`
@@ -93,10 +95,10 @@ start_server
 TOKEN=$(grep -o 'setup?token=[a-z0-9]*' "$ROOT/server.log" | head -1 | cut -d= -f2)
 [ -n "$TOKEN" ] || fail "no setup token printed"
 curl -sf -c "$ROOT/jar" -X POST "$B/api/setup" -H 'Content-Type: application/json' \
-  -d "{\"token\":\"$TOKEN\",\"username\":\"abdul\",\"password\":\"correct-horse-9\"}" | json 'd["csrf"]' >"$ROOT/csrf"
+  -d "{\"token\":\"$TOKEN\",\"username\":\"abdul\",\"password\":\"$ADMIN_PW\"}" | json 'd["csrf"]' >"$ROOT/csrf"
 pass "admin created from the setup URL"
 reuse() { curl -s -X POST "$B/api/setup" -H 'Content-Type: application/json' \
-  -d "{\"token\":\"$TOKEN\",\"username\":\"intruder\",\"password\":\"correct-horse-9\"}" | grep -q "already used"; }
+  -d "{\"token\":\"$TOKEN\",\"username\":\"intruder\",\"password\":\"$ADMIN_PW\"}" | grep -q "already used"; }
 check "setup URL is single-use" reuse
 
 step "2. workspaces"
