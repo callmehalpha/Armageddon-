@@ -11,7 +11,7 @@ Prototypes P1, P2, P4 and P5 from [§11 of the v0.1 design](../v0.1-architecture
 | Prototype | Question | Verdict | Detail |
 |-----------|----------|---------|--------|
 | **P1** | Is git-shadow capture fast enough for continuous checkpoints? | **Pass at 5k and 50k; marginal at 200k** (only with scoped capture: 896 ms p95 vs a 1 s target). Found the transport bug ⟨P-1⟩. Storage criterion replaced | [P1-capture-perf.md](P1-capture-perf.md) |
-| **P2** | Does capture → apply round-trip byte-exactly? | **Pass on Linux ↔ Linux**; macOS untested | [P2-roundtrip.md](P2-roundtrip.md) |
+| **P2** | Does capture → apply round-trip byte-exactly? | **Pass on Linux ↔ Linux.** 10,000 sequences, 149,998 rounds, 33,568 crash resumes; 0 working-tree mismatches; 1 index-only edge case originating in Git. macOS untested | [P2-roundtrip.md](P2-roundtrip.md) |
 | **P4** | Can crashes or partitions lose acknowledged or unacknowledged work? | **Pass** after 3 protocol additions (the original protocol was safe but could stall) | [P4-failure-model.md](P4-failure-model.md) |
 | **P5** | Can the server host the canonical repo with authz, fencing and trash refs? | **Pass, 13 of 13 scenarios**, after replacing CGI with a native smart-HTTP front end. Overhead +0.3–0.9% | [P5-git-hosting.md](P5-git-hosting.md) |
 

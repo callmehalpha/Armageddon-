@@ -1,6 +1,6 @@
 # P2: Byte-exact capture → apply round-trip
 
-**Verdict: PASS on Linux ↔ Linux** (__SEQS__ sequences, 0 mismatches) **after six fixes to the apply algorithm and two design changes.** macOS was **not tested**: there is no macOS host in this environment. The case-folding and Unicode-normalisation collision *detector* is implemented and self-tested, but behaviour on APFS remains open.
+**Verdict: PASS on Linux ↔ Linux after seven fixes to the apply algorithm and two design changes.** The run covered 10,000 sequences and 149,998 capture-and-apply rounds. Working trees were byte-identical in **every** round. There was **one** index-only mismatch in 10,000 sequences; Git itself created the index state involved (details below), and no data was lost. macOS was **not tested**: there is no macOS host in this environment. The case-folding and Unicode-normalisation collision *detector* is implemented and self-tested, but behaviour on APFS remains open.
 
 Code:
 - [`prototypes/p2-roundtrip`](../../../prototypes/p2-roundtrip/main.go): the fuzz harness;
@@ -42,9 +42,32 @@ Each sequence works like this:
 
 ## Results
 
-```
-__RESULTS__
-```
+Four parallel shards of 2,500 sequences × 15 rounds (seeds 1, 100001, 200001, 300001), 1 h 50 min each:
+
+| | Total |
+|-|-:|
+| Sequences | 10,000 |
+| Capture → transfer → apply rounds | 149,998 |
+| Random edit operations | 675,365 |
+| Writer swaps (handoffs) | 29,701 |
+| Injected crashes mid-apply → successful resume | 33,568 → 33,568 |
+| Divergence tests (destination modified before apply) → refused with `ErrDiverged` | 14,660 → 14,660 |
+| Ignored-file tolerance tests | 15,040 |
+| Directories displaced (rule ⟨P-4⟩) | 803 |
+| Rounds with staged changes / with unmerged (conflict) entries | 130,709 / 3,507 |
+| Paths flagged by the case-folding / normalisation collision detector | 2,623 |
+| Working-tree mismatches (independent oracle) | **0** |
+| Index mismatches | **1** (below) |
+
+Each shard's operation mix was roughly even across the 20 operation types; one shard: create 26k, modify 17k, and 4–9k each of delete, rename, case-rename, chmod, symlink, file↔symlink, file→dir, dir→file, mkdir-empty, rmdir, stage, partial stage, unstage, staged delete, `.env` and ignored noise.
+
+### The one index mismatch (seed 201932, round 13): a Git edge case, no data loss
+
+A trace of the writer showed **Git itself** creating an invalid index. Operation 6 of round 9 ran `git add -- über1/日本9/lib15/readme/CHILD`. That path is *below* `über1/日本9`, a tracked file the fuzzer had turned into a directory. Git 2.43 added the child entry but kept the stale file entry: a file/directory conflict that Git's own `write-tree` would reject.
+
+The replica reproduced that state exactly in round 9 (indexes compared equal). In round 13, `update-index --index-info` on the replica normalised the conflict instead of reproducing it, so the two indexes differ. The **working trees were byte-identical**: the oracle ran before the index comparison and passed.
+
+**Decision:** an index Git cannot write as a tree is not reproduced. The follower converges on a valid index, and no file content is affected. Implementation note: the agent should detect file/directory conflicts in a writer's staged delta and report them, rather than fail silently.
 
 ## Bugs found and fixed
 
@@ -74,6 +97,6 @@ Separately, P2 surfaced two **design changes** in the index format (§6.2):
 
 ## Portability (macOS / Windows): not tested here
 
-`Collisions()` detects paths that collide under full Unicode case folding plus NFC normalisation, including directory-prefix collisions. Its self-test cases: `README.md`/`readme.md`, `café` NFC/NFD, `straße`/`STRASSE`, `A/x`/`a/y`. The fuzz trees produced __COLL__ real collisions, and all were detected.
+`Collisions()` detects paths that collide under full Unicode case folding plus NFC normalisation, including directory-prefix collisions. Its self-test cases: `README.md`/`readme.md`, `café` NFC/NFD, `straße`/`STRASSE`, `A/x`/`a/y`. The fuzz trees produced 2,623 real collisions, and all were detected.
 
 What happens when such a checkpoint is applied *on* APFS is untested. The v0.1 policy proposed in the README is to refuse to apply a checkpoint containing collisions on a case-insensitive replica, with a clear error, rather than letting the filesystem merge two files. This needs a macOS run before implementation.
