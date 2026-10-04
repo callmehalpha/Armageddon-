@@ -216,10 +216,8 @@ func (s *Shadow) CaptureTreeScoped(changed []string, prevEmpty []string) (string
 	for d := range dirSet {
 		dirs = append(dirs, d)
 	}
-	dnul := []byte(strings.Join(dirs, "\x00"))
 	if len(s.Preserve) > 0 {
-		out, err := s.Git(dnul, "--literal-pathspecs", "ls-files", "-z", "-o", "-i", "--exclude-standard", "--directory",
-			"--pathspec-from-file=-", "--pathspec-file-nul")
+		out, err := s.Git(nil, append([]string{"--literal-pathspecs", "ls-files", "-z", "-o", "-i", "--exclude-standard", "--directory", "--"}, dirs...)...)
 		if err != nil {
 			return "", st, err
 		}
@@ -248,8 +246,7 @@ func (s *Shadow) CaptureTreeScoped(changed []string, prevEmpty []string) (string
 			empty[d] = true
 		}
 	}
-	out, err := s.Git(dnul, "--literal-pathspecs", "ls-files", "-z", "-o", "--exclude-standard", "--directory",
-		"--pathspec-from-file=-", "--pathspec-file-nul")
+	out, err := s.Git(nil, append([]string{"--literal-pathspecs", "ls-files", "-z", "-o", "--exclude-standard", "--directory", "--"}, dirs...)...)
 	if err != nil {
 		return "", st, err
 	}
