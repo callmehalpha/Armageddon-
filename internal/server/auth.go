@@ -234,7 +234,8 @@ func (s *Server) handleLogout(rw http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMe(rw http.ResponseWriter, r *http.Request) {
 	u := userOf(r)
 	if u == nil {
-		writeErr(rw, 401, "not logged in")
+		// 200 with no user: "am I logged in?" is not an error for the UI.
+		writeJSON(rw, 200, map[string]any{"user": nil})
 		return
 	}
 	out := map[string]any{"user": publicUser(u)}

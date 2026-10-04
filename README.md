@@ -6,6 +6,8 @@ Armageddon is a self-hosted development workspace server. Your code, Git history
 
 > **Status: MVP (v0.1 first slice).** See [`docs/design/`](docs/design/) for the design contract and plan. Everything here runs; the [MVP limits](#mvp-limits) are real.
 
+![Workspace with browser terminal](docs/screenshots/2-workspace.png)
+
 ## How it works
 
 - **The server seat is where you work.** Each workspace has a Git working tree on the server, with a browser terminal. Each workspace runs as its own OS user.
@@ -48,6 +50,7 @@ For TLS, pass `--tls-cert/--tls-key` to `server init`, or put the server behind 
 ```sh
 go test ./...                       # unit tests
 sudo test/e2e/mvp.sh ./armageddon   # MVP acceptance test (root; uses /srv and github.com)
+node test/e2e/ui.mjs <setup-url>    # browser test (Playwright + Chromium) against a fresh server
 ```
 
 The acceptance test runs the north-star scenario on one machine:

@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -64,7 +63,6 @@ func (s *Server) handleTerminal(rw http.ResponseWriter, r *http.Request, w *stor
 		// P-13: interactive shells get the trash hooks through the
 		// environment, not only through repo config.
 		"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=core.hooksPath", "GIT_CONFIG_VALUE_0="+rt.p.Hooks,
-		fmt.Sprintf("PS1=\\[\\e[1;36m\\]%s\\[\\e[0m\\]:\\w\\$ ", w.Slug),
 	)
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}

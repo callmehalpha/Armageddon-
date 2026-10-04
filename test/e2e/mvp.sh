@@ -182,6 +182,9 @@ check "and reaches a newly cloned replica" grep -q "not committed" "$LAPTOP/repl
 step "8. git access control"
 check "push from a read-only replica is refused with lease_lost" bash -c "! git -C '$LAPTOP/replica' push -q armageddon HEAD:refs/heads/from-laptop 2>'$ROOT/push.err' && grep -q lease_lost '$ROOT/push.err'"
 check "anonymous git access refused" test "$(curl -s -o /dev/null -w '%{http_code}' "$B/git/$WS.git/info/refs?service=git-upload-pack")" = 401
+DELETED=$(as_ws "$WS" "git rev-parse master 2>/dev/null || git rev-parse HEAD~1")
+as_ws "$WS" "git branch -q doomed $DELETED && git branch -q -D doomed"
+check "deleting a branch on the server seat leaves a recoverable trash ref" bash -c "runuser -u $OWNER -- git --git-dir='$DATA/workspaces/$WS/repo.git' for-each-ref --format='%(objectname) %(refname)' refs/armageddon/trash/ | grep -q '$DELETED .*/delete/heads/doomed'"
 check "trash ref hidden from clients" bash -c "! git -C '$LAPTOP/replica' ls-remote armageddon | grep -q refs/armageddon"
 
 printf '\n\033[32mALL MVP ACCEPTANCE CHECKS PASSED\033[0m\n'

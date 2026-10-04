@@ -219,7 +219,12 @@ func (s *Server) importWorkspace(w *store.Workspace, owner *store.User) error {
 	if err := os.WriteFile(filepath.Join(p.Home, ".gitconfig"), []byte(gitcfg), 0o600); err != nil {
 		return err
 	}
-	a.Chown(filepath.Join(p.Home, ".gitconfig"))
+	// Login shells read .bash_profile; keep the prompt short and relative
+	// to the workspace rather than the server's directory layout.
+	bashrc := fmt.Sprintf("export PS1='\\[\\e[1;36m\\]%s\\[\\e[0m\\]:\\W\\$ '\n", w.Slug)
+	os.WriteFile(filepath.Join(p.Home, ".bashrc"), []byte(bashrc), 0o600)
+	os.WriteFile(filepath.Join(p.Home, ".bash_profile"), []byte("[ -f ~/.bashrc ] && . ~/.bashrc\n"), 0o600)
+	a.Chown(filepath.Join(p.Home, ".gitconfig"), filepath.Join(p.Home, ".bashrc"), filepath.Join(p.Home, ".bash_profile"))
 
 	run := func(dir string, args ...string) error {
 		cmd := a.Command(dir, "git", args...)
