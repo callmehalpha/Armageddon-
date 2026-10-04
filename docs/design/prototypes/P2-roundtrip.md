@@ -48,7 +48,7 @@ __RESULTS__
 
 ## Bugs found and fixed
 
-The fuzzer found these within the first ~400 rounds. All are fixed in `gitshadow` and covered by the run above.
+Bugs 1–6 were found within the first ~400 rounds, and bug 7 by the full run. All are fixed in `gitshadow` and covered by the run above.
 
 | # | Bug | Fix |
 |---|-----|-----|
@@ -58,6 +58,7 @@ The fuzzer found these within the first ~400 rounds. All are fixed in `gitshadow
 | 4 | Resume after a crash: deletes that had already happened were skipped *before* their parent directory was recorded, so a directory that should become a file was never pruned | Record the parent before deciding to skip |
 | 5 | Resume after a crash: a delete whose path had already been replaced (by a directory a later put created, or by its own type-change put) looked like a conflict | On resume, "already in the target state" counts as done |
 | 6 | Directory → file on the writer, while the replica's directory still held **local ignored files**: apply refused forever | Move the blocking directory to a replica-private `displaced/` area (outside the working tree), report it, and continue. Ignored files are moved, never deleted (I4) |
+| 7 | Resume after a crash, where a directory became a file and the crash came after the file was written: checking the old child path failed with `ENOTDIR`. Found only by the 10,000-sequence run; the 60-sequence runs missed it | `ENOTDIR` (a parent component is now a file) means the path is absent |
 | — | Temporary files a real crash leaves between write and rename | Resume removes `.armageddon-tmp-*` in the affected directories |
 
 Separately, P2 surfaced two **design changes** in the index format (§6.2):
