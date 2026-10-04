@@ -65,7 +65,7 @@ func (s *Store) ListUsers() ([]*User, error) {
 // ---- sessions ----
 
 type Session struct {
-	ID, UserID, TokenHash, CSRF                    string
+	ID, UserID, TokenHash, CSRF                string
 	CreatedAt, LastSeenAt, ExpiresAt, ReauthAt int64
 }
 

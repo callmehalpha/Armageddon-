@@ -195,7 +195,7 @@ func (s *Store) LeaseOf(tx *sql.Tx, wsID string) (*Lease, error) {
 
 type Checkpoint struct {
 	ID, WorkspaceID, ParentID, AuthorKind, AuthorDevice, HeadRef, HeadOid, WorktreeTree, Kind string
-	Seq, Epoch, CreatedAt                                                                    int64
+	Seq, Epoch, CreatedAt                                                                     int64
 }
 
 const cpCols = `id, workspace_id, COALESCE(parent_id, ''), author_kind, COALESCE(author_device_id, ''), head_ref, head_oid, worktree_tree, kind, seq, epoch, created_at`
@@ -273,7 +273,7 @@ func (s *Store) AdvanceCurrent(tx *sql.Tx, wsID, expectedParent, newID string, n
 
 type Quarantine struct {
 	ID, WorkspaceID, SourceKind, SourceDevice, CheckpointID, BaseCheckpointID, Reason string
-	CreatedAt                                                                        int64
+	CreatedAt                                                                         int64
 }
 
 func (s *Store) InsertQuarantine(q *Quarantine) error {

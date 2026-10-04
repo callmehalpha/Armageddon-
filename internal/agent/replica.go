@@ -408,4 +408,3 @@ func (c *Client) Status(wsID string, out io.Writer) error {
 	}
 	return nil
 }
-

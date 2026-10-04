@@ -447,4 +447,3 @@ func (s *Server) handleRevokeDevice(rw http.ResponseWriter, r *http.Request) {
 	s.event("", "user", userOf(r).ID, "device.revoked", map[string]string{"device_id": id})
 	writeJSON(rw, 200, map[string]bool{"ok": true})
 }
-
