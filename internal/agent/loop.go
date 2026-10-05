@@ -256,6 +256,16 @@ func (r *replica) setOnline() {
 	r.connected = true
 }
 
+// heartbeatInterval is 15 s, or a quarter of the server's T_stale when
+// that is shorter, so a live writer is never shown as STALE.
+func (r *replica) heartbeatInterval() time.Duration {
+	d := heartbeatEvery
+	if s := time.Duration(r.st.Lease.StaleAfterMS) * time.Millisecond / 4; s > 0 && s < d {
+		d = s
+	}
+	return d
+}
+
 // periodic runs every tick: retries, heartbeats, status reports.
 func (r *replica) periodic(now time.Time) {
 	if len(r.st.Outbox) > 0 && now.Sub(r.lastRetry) >= 2*time.Second {
@@ -263,7 +273,7 @@ func (r *replica) periodic(now time.Time) {
 		r.flushOutbox()
 	}
 	if r.st.Epoch > 0 {
-		if now.Sub(r.lastHeartbeat) >= heartbeatEvery {
+		if now.Sub(r.lastHeartbeat) >= r.heartbeatInterval() {
 			r.heartbeat()
 		}
 		if len(r.st.Pending) > 0 && now.Sub(r.lastRetry) >= 2*time.Second {

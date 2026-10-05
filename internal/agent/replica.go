@@ -133,6 +133,7 @@ type leaseInfo struct {
 	HandoffToName string `json:"handoff_to_name"`
 	HeartbeatAt   int64  `json:"heartbeat_at"`
 	Now           int64  `json:"now"`
+	StaleAfterMS  int64  `json:"stale_after_ms"`
 	You           bool   `json:"you"`
 }
 

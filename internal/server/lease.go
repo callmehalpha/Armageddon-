@@ -121,7 +121,7 @@ func (s *Server) leaseJSON(l *store.Lease, caller *store.Device) map[string]any 
 	h := holderOf(l)
 	out := map[string]any{"holder": h.String(), "holder_kind": l.HolderKind, "holder_device": l.HolderDevice,
 		"holder_name": s.seatName(h), "epoch": l.Epoch, "state": s.effectiveState(l), "handoff_to": l.HandoffTo,
-		"heartbeat_at": l.HeartbeatAt, "acquired_at": l.AcquiredAt, "now": s.now(),
+		"heartbeat_at": l.HeartbeatAt, "acquired_at": l.AcquiredAt, "now": s.now(), "stale_after_ms": s.cfg.TStale().Milliseconds(),
 		"you": caller != nil && l.HolderKind == "device" && l.HolderDevice == caller.ID}
 	if l.HandoffTo != "" {
 		out["handoff_to_name"] = s.seatName(parseSeat(l.HandoffTo))
