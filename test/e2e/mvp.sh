@@ -16,7 +16,9 @@
 #   7. uncommitted work survives a server restart
 #   8. git access control
 #   9. only the helper runs as root
-set -euo pipefail
+set -Eeuo pipefail
+# A failing command outside `check` aborts the run: say which one.
+trap 'printf "\033[31mFAIL\033[0m command failed (line %s): %s\n" "$LINENO" "$BASH_COMMAND"' ERR
 
 BIN=${1:-$(command -v armageddon)}
 BIN=$(readlink -f "$BIN")
@@ -39,10 +41,11 @@ pass() { printf '\033[32mPASS\033[0m %s\n' "$*"; }
 check() { local d=$1; shift; if "$@"; then pass "$d"; else fail "$d"; fi; }
 fail() { printf '\033[31mFAIL\033[0m %s\n' "$*"; exit 1; }
 step() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
-SERVER_PID= HELPER_PID=
+SERVER_PID= HELPER_PID= FOLLOW_PID=
 cleanup() {
   [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null || true
   [ -n "$HELPER_PID" ] && kill "$HELPER_PID" 2>/dev/null || true
+  [ -n "$FOLLOW_PID" ] && kill "$FOLLOW_PID" 2>/dev/null || true
 }
 trap cleanup EXIT
 
