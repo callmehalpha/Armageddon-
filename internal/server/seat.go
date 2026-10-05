@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"log"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -101,7 +102,7 @@ func (s *Server) syncSeatLocked(rt *runtime) error {
 	}
 	seed := base == ""
 	if !seed {
-		st, err := rt.seat.CaptureState()
+		st, err := s.seatState(rt)
 		if err != nil {
 			return err
 		}
@@ -128,19 +129,19 @@ func (s *Server) syncSeatLocked(rt *runtime) error {
 		return fmt.Errorf("point HEAD: %w", err)
 	}
 	if seed {
-		err = rt.seat.Seed(cur)
+		err = s.seatApply(rt, "", cur)
 	} else {
-		err = rt.seat.Apply(base, cur, gitshadow.ApplyOptions{})
+		err = s.seatApply(rt, base, cur)
 		if err == gitshadow.ErrDiverged {
 			// Changed between the check and the apply.
-			st, cerr := rt.seat.CaptureState()
+			st, cerr := s.seatState(rt)
 			if cerr == nil {
 				cerr = s.quarantineSeat(rt, st, base)
 			}
 			if cerr != nil {
 				return cerr
 			}
-			err = rt.seat.Seed(cur)
+			err = s.seatApply(rt, "", cur)
 		}
 	}
 	if err != nil {
@@ -171,5 +172,43 @@ func (s *Server) quarantineSeat(rt *runtime, st gitshadow.State, base string) er
 	}
 	s.event(rt.id, "server", "", "quarantine.created", map[string]string{"id": qid, "reason": "server_drift", "source": "server"})
 	log.Printf("workspace %s: server drift kept as quarantine %s", rt.id, qid)
+	return nil
+}
+
+// seatState captures the server worktree for drift detection. While a
+// device writes, tree/'s HEAD can name a branch the device just deleted
+// (the next checkpoint moves it), so the index delta may be unavailable;
+// the drift check needs only the files.
+func (s *Server) seatState(rt *runtime) (gitshadow.State, error) {
+	if st, err := rt.seat.CaptureState(); err == nil {
+		return st, nil
+	}
+	tree, stats, err := rt.seat.CaptureTree()
+	if err != nil {
+		return gitshadow.State{}, err
+	}
+	empty := stats.EmptyDirs
+	if empty == nil {
+		empty = []string{}
+	}
+	return gitshadow.State{Tree: tree, EmptyDirs: empty, Staged: []gitshadow.StagedEntry{}}, nil
+}
+
+// seatApply runs the apply (or, with from == "", a seed) as the workspace
+// user through `armageddon hook seat-apply`: apply writes files in a tree
+// the workspace user controls, so it must never run as the server (§2.5).
+// With the privilege split this becomes a helper operation.
+func (s *Server) seatApply(rt *runtime, from, to string) error {
+	if from == "" {
+		from = "-"
+	}
+	cmd := rt.acct.Command(rt.p.Tree, s.hookBin, "hook", "seat-apply", rt.seat.GitDir, rt.seat.WorkTree, rt.seat.IndexFile, from, to)
+	out, err := cmd.CombinedOutput()
+	if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 3 {
+		return gitshadow.ErrDiverged
+	}
+	if err != nil {
+		return fmt.Errorf("seat apply: %v: %s", err, strings.TrimSpace(string(out)))
+	}
 	return nil
 }

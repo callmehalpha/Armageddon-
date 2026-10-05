@@ -140,7 +140,11 @@ func (r *replica) poll(ctx context.Context, ch chan<- pollResult) {
 		r.knownMu.Lock()
 		k := r.known
 		r.knownMu.Unlock()
-		q := url.Values{"after": {fmt.Sprint(k.seq)}, "wait": {"50"}, "known_epoch": {fmt.Sprint(k.epoch)},
+		wait := "50"
+		if k.epoch < 0 {
+			wait = "0" // the lease is unknown: resync at once
+		}
+		q := url.Values{"after": {fmt.Sprint(k.seq)}, "wait": {wait}, "known_epoch": {fmt.Sprint(k.epoch)},
 			"known_state": {k.state}, "known_holder": {k.holder}}
 		var cur current
 		_, err := r.c.call("GET", "/api/workspaces/"+r.st.WorkspaceID+"/current?"+q.Encode(), nil, &cur)
@@ -187,11 +191,13 @@ func (r *replica) run(ctx context.Context) error {
 	pollCh := make(chan pollResult)
 	pctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	go r.poll(pctx, pollCh)
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
 	r.lastBackstop = time.Now()
 	r.onLocalChange() // startup is a full capture (P-12)
+	r.resync()        // learn the lease now (missed grant, lost lease while down)
+	r.flushOutbox()
+	go r.poll(pctx, pollCh)
 	for {
 		select {
 		case <-ctx.Done():

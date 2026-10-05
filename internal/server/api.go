@@ -295,6 +295,9 @@ func (s *Server) handleQuarantines(rw http.ResponseWriter, r *http.Request, w *s
 		writeErr(rw, 500, err.Error())
 		return
 	}
+	if qs == nil {
+		qs = []*store.Quarantine{}
+	}
 	writeJSON(rw, 200, qs)
 }
 
