@@ -177,8 +177,8 @@ func (m *Manifest) VerifyFile(name, path string) error {
 	return nil
 }
 
-// Build creates a manifest for every armageddon-* binary and install.sh in
-// dir. The signature and the manifest itself are skipped.
+// Build creates a manifest for every armageddon-* binary, install.sh and
+// systemd unit (*.service) in dir. The signature and the manifest itself are skipped.
 func Build(dir, version, commit, minUpgradeFrom string, schemaVersion int, cs *CodeServer) (*Manifest, error) {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
@@ -189,7 +189,8 @@ func Build(dir, version, commit, minUpgradeFrom string, schemaVersion int, cs *C
 		SchemaVersion: schemaVersion, CodeServer: cs, Files: []File{}}
 	for _, e := range ents {
 		n := e.Name()
-		if e.IsDir() || !(strings.HasPrefix(n, "armageddon-") || n == "install.sh") || strings.HasSuffix(n, ".tar") || strings.HasSuffix(n, ".minisig") {
+		listed := strings.HasPrefix(n, "armageddon-") || n == "install.sh" || strings.HasSuffix(n, ".service")
+		if e.IsDir() || !listed || strings.HasSuffix(n, ".tar") || strings.HasSuffix(n, ".minisig") {
 			continue
 		}
 		sum, size, err := SHA256File(filepath.Join(dir, n))
