@@ -143,6 +143,9 @@ func (s *Shadow) CaptureTree() (string, CaptureStats, error) {
 	if _, err := s.Git(nil, "add", "-A", "--", "."); err != nil {
 		return "", st, err
 	}
+	if err := s.dropFoldedStale(); err != nil {
+		return "", st, err
+	}
 	// Preserve: ignored-but-wanted files (.env*). --directory collapses
 	// ignored directories so node_modules is not descended into.
 	if len(s.Preserve) > 0 {

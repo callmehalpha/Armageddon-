@@ -72,7 +72,7 @@ jobs:
           seed=$(( SHARD * 1000000 + 1 ))
           go build -o "$RUNNER_TEMP/p2" ./p2-roundtrip
           set +e
-          "$RUNNER_TEMP/p2" -seqs "$seqs" -rounds "$rounds" -seed "$seed" -workdir "$RUNNER_TEMP/p2w" 2>&1 | tee "$RUNNER_TEMP/p2.log"
+          "$RUNNER_TEMP/p2" -seqs "$seqs" -rounds "$rounds" -seed "$seed" -workdir "$RUNNER_TEMP/p2w" -keep 2>&1 | tee "$RUNNER_TEMP/p2.log"
           rc=${PIPESTATUS[0]}
           {
             echo "### P2 fuzz on macOS, shard $SHARD (seqs=$seqs rounds=$rounds seed=$seed): exit $rc"
@@ -81,6 +81,16 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
+      - name: upload failing sequences (kept by -keep)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2-macos-failures-shard-${{ matrix.shard }}
+          path: |
+            ${{ runner.temp }}/p2w
+            ${{ runner.temp }}/p2.log
+          if-no-files-found: ignore
+          retention-days: 14
 
   xplat-local-macos:
     name: focus cases, export+import on macOS
