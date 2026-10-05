@@ -18,7 +18,8 @@ ARCH=$(uname -m); case $ARCH in x86_64) ARCH=amd64 ;; aarch64) ARCH=arm64 ;; esa
 
 # A throwaway signing key, generated for this run only.
 go build -o "$W/tool" "$ROOT/cmd/armageddon"
-export MINISIGN_PASSWORD=throwaway-$$
+MINISIGN_PASSWORD=$(openssl rand -hex 24)
+export MINISIGN_PASSWORD
 "$W/tool" release keygen --out "$W/key" >/dev/null
 PUB=$(tail -1 "$W/key.pub")
 

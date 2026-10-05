@@ -121,11 +121,12 @@ func TestPublicKeyFileFormatAndDerivation(t *testing.T) {
 	if testing.Short() {
 		t.Skip("encrypted minisign keys use expensive scrypt parameters")
 	}
-	secret, pub, err := GenerateKey("pw")
+	pass := randomPassphrase(t)
+	secret, pub, err := GenerateKey(pass)
 	if err != nil {
 		t.Fatal(err)
 	}
-	derived, err := PublicKeyOf(secret, "pw")
+	derived, err := PublicKeyOf(secret, pass)
 	if err != nil || derived != pub {
 		t.Fatalf("derived %q, want %q (%v)", derived, pub, err)
 	}
@@ -135,7 +136,7 @@ func TestPublicKeyFileFormatAndDerivation(t *testing.T) {
 	if _, err := ParsePublicKey("untrusted comment: minisign public key\n" + pub + "\n"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := PublicKeyOf(secret, "wrong"); err == nil {
+	if _, err := PublicKeyOf(secret, randomPassphrase(t)); err == nil {
 		t.Fatal("wrong password accepted")
 	}
 }

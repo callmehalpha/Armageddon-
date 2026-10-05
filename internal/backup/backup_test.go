@@ -127,7 +127,8 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 	os.WriteFile(filepath.Join(data, "keys", "server.key"), []byte("secret key material"), 0o600)
 
 	var log bytes.Buffer
-	dir, err := Run(Options{DataDir: data, To: filepath.Join(base, "backups"), Passphrase: []byte("correct horse"), ServerVersion: "test", Log: &log})
+	pass := randomPassphrase(t)
+	dir, err := Run(Options{DataDir: data, To: filepath.Join(base, "backups"), Passphrase: pass, ServerVersion: "test", Log: &log})
 	if err != nil {
 		t.Fatalf("backup: %v\n%s", err, log.String())
 	}
@@ -147,12 +148,12 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 
 	// Wrong passphrase: refused before anything is written.
 	fresh := filepath.Join(base, "fresh")
-	if _, err := Restore(RestoreOptions{Backup: dir, DataDir: fresh, Passphrase: []byte("wrong")}); err == nil {
+	if _, err := Restore(RestoreOptions{Backup: dir, DataDir: fresh, Passphrase: randomPassphrase(t)}); err == nil {
 		t.Fatal("wrong passphrase accepted")
 	}
 	os.RemoveAll(fresh)
 
-	rep, err := Restore(RestoreOptions{Backup: dir, DataDir: fresh, Passphrase: []byte("correct horse"), Log: &log})
+	rep, err := Restore(RestoreOptions{Backup: dir, DataDir: fresh, Passphrase: pass, Log: &log})
 	if err != nil {
 		t.Fatalf("restore: %v\n%s", err, log.String())
 	}
@@ -222,18 +223,19 @@ func newServerExisting(t *testing.T, data string) *server.Server {
 }
 
 func TestEncryptDecrypt(t *testing.T) {
-	sealed, err := Encrypt([]byte("keys"), []byte("pw"))
+	pass := randomPassphrase(t)
+	sealed, err := Encrypt([]byte("keys"), pass)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p, err := Decrypt(sealed, []byte("pw")); err != nil || string(p) != "keys" {
+	if p, err := Decrypt(sealed, pass); err != nil || string(p) != "keys" {
 		t.Fatal(p, err)
 	}
-	if _, err := Decrypt(sealed, []byte("nope")); err != ErrPassphrase {
+	if _, err := Decrypt(sealed, randomPassphrase(t)); err != ErrPassphrase {
 		t.Fatal(err)
 	}
 	sealed[len(sealed)-1] ^= 1
-	if _, err := Decrypt(sealed, []byte("pw")); err != ErrPassphrase {
+	if _, err := Decrypt(sealed, pass); err != ErrPassphrase {
 		t.Fatal("tampered archive accepted")
 	}
 }

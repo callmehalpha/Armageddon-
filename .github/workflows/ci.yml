@@ -76,7 +76,8 @@ jobs:
       - name: two releases signed with a throwaway key
         run: |
           go build -o "$RUNNER_TEMP/tool" ./cmd/armageddon
-          export MINISIGN_PASSWORD="ci-throwaway-$GITHUB_RUN_ID"
+          MINISIGN_PASSWORD="$(openssl rand -hex 24)"
+          export MINISIGN_PASSWORD
           "$RUNNER_TEMP/tool" release keygen --out "$RUNNER_TEMP/key"
           export TARGETS=linux/amd64 MINISIGN_SECRET_KEY_FILE="$RUNNER_TEMP/key.key"
           deploy/make-release.sh 0.1.1 "$GITHUB_SHA" "$RUNNER_TEMP/r1"
