@@ -65,6 +65,9 @@ type runtime struct {
 	fence sync.RWMutex
 	// commitMu serialises authority commands for this workspace (§4.1).
 	commitMu sync.Mutex
+	// captureMu serialises server-seat captures (the loop and explicit
+	// syncs share the seat's capture index).
+	captureMu sync.Mutex
 
 	notifyMu sync.Mutex
 	notify   chan struct{} // closed and replaced on every committed checkpoint
@@ -382,6 +385,8 @@ func (s *Server) startCaptureLoop(ctx context.Context, rt *runtime) {
 // captureOnce captures the server seat and commits a checkpoint if the
 // working state changed. Returns the new sequence number (0 if unchanged).
 func (s *Server) captureOnce(rt *runtime) (int64, error) {
+	rt.captureMu.Lock()
+	defer rt.captureMu.Unlock()
 	w, err := s.store.WorkspaceByID(rt.id)
 	if err != nil {
 		return 0, err
