@@ -39,3 +39,58 @@ jobs:
           sudo install -m 0755 armageddon /usr/local/bin/armageddon
           sudo mkdir -p /srv && sudo chmod 755 /srv
           sudo -E env "PATH=$PATH" test/e2e/mvp.sh /usr/local/bin/armageddon
+      - name: operations test (TLS pinning, doctor, backup/restore)
+        run: sudo -E env "PATH=$PATH" PORT=8104 test/e2e/ops.sh /usr/local/bin/armageddon
+
+  installer:
+    # install.sh without touching the runner: --prefix into a temp root.
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: shellcheck
+        run: |
+          sudo apt-get install -y -qq shellcheck >/dev/null
+          shellcheck --shell=sh deploy/install.sh deploy/make-release.sh deploy/docker-entrypoint.sh
+          shellcheck test/e2e/*.sh test/install/*.sh
+      - name: installer under --prefix (signed, unsigned, tampered, idempotent)
+        run: test/install/prefix.sh
+
+  install:
+    # install.sh --bundle in systemd containers, then update, rollback,
+    # doctor and uninstall on real systemd.
+    runs-on: ubuntu-latest
+    needs: installer
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['debian:12', 'ubuntu:24.04', 'fedora:40']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: two releases signed with a throwaway key
+        run: |
+          go build -o "$RUNNER_TEMP/tool" ./cmd/armageddon
+          export MINISIGN_PASSWORD="ci-throwaway-$GITHUB_RUN_ID"
+          "$RUNNER_TEMP/tool" release keygen --out "$RUNNER_TEMP/key"
+          export TARGETS=linux/amd64 MINISIGN_SECRET_KEY_FILE="$RUNNER_TEMP/key.key"
+          deploy/make-release.sh 0.1.1 "$GITHUB_SHA" "$RUNNER_TEMP/r1"
+          deploy/make-release.sh 0.1.2 "$GITHUB_SHA" "$RUNNER_TEMP/r2"
+          rm -f "$RUNNER_TEMP/key.key"
+      - name: install, update, rollback, uninstall
+        run: test/install/container.sh "${{ matrix.image }}" "$RUNNER_TEMP/r1" "$RUNNER_TEMP/r2"
+
+  compose:
+    # docker compose up, a workspace and its user in the container, data
+    # across recreation, and mvp.sh inside the image.
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: compose deployment
+        run: test/e2e/compose.sh

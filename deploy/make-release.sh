@@ -11,6 +11,7 @@
 #
 # Environment:
 #   MINISIGN_SECRET_KEY, MINISIGN_PASSWORD  signing key (a GitHub secret); unset = unsigned
+#   MINISIGN_SECRET_KEY_FILE                the secret key from a file instead
 #   CODE_SERVER_JSON                        pinned code-server entry (see deploy/code-server.json)
 #   TARGETS                                 default "linux/amd64 linux/arm64 darwin/amd64 darwin/arm64"
 set -eu
@@ -28,6 +29,10 @@ TOOL=$OUT/.tool-armageddon
 (cd "$ROOT" && CGO_ENABLED=0 go build -o "$TOOL" ./cmd/armageddon)
 
 PUBKEY=
+if [ -z "${MINISIGN_SECRET_KEY:-}" ] && [ -n "${MINISIGN_SECRET_KEY_FILE:-}" ]; then
+  MINISIGN_SECRET_KEY=$(cat "$MINISIGN_SECRET_KEY_FILE")
+  export MINISIGN_SECRET_KEY
+fi
 if [ -n "${MINISIGN_SECRET_KEY:-}" ]; then
   PUBKEY=$("$TOOL" release pubkey)
   echo "signing with public key $PUBKEY"
