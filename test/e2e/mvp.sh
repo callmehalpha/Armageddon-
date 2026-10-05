@@ -83,6 +83,16 @@ for p in sys.stdin.buffer.read().split(b"\0"):
     else: print("missing", p.decode())
 ' "$1"
 }
+# settle ID LOG: capture the server seat's final state, then wait until the
+# follower writing LOG has applied that checkpoint. The capture loop can commit
+# a checkpoint of a half-finished edit script; waiting only for "a newer seq"
+# races with it.
+settle() {
+  api POST "/api/workspaces/$1/sync" '' >/dev/null
+  local s; s=$(seq_of "$1")
+  for _ in $(seq 60); do grep -qE "applied checkpoint #$s\$" "$2" && return; sleep 0.5; done
+  fail "follower did not apply checkpoint #$s"
+}
 same_tree() { # same_tree A B
   tree_sum "$1" >"$ROOT/a.sum" && tree_sum "$2" >"$ROOT/b.sum" && [ -s "$ROOT/a.sum" ] && diff -u "$ROOT/a.sum" "$ROOT/b.sum"
 }
@@ -141,8 +151,7 @@ check "replica HEAD and history are identical" same_head
 FOLLOW_PID=$!
 sleep 1
 as_ws "$WS" "echo 'live edit' >> notes.txt && git rm -q --cached .env >/dev/null 2>&1 || true; rm -rf src && git checkout -q -b feature && echo f > feature.txt && git add feature.txt && git commit -qm feature"
-S2=$(seq_of "$WS"); wait_seq_gt "$WS" "$S2"
-for _ in $(seq 40); do grep -q "applied checkpoint #$(seq_of "$WS")" "$ROOT/follow.log" && break; sleep 0.5; done
+settle "$WS" "$ROOT/follow.log"
 check "replica follows live edits, deletes and a branch switch + commit" same_tree "$DATA/workspaces/$WS/tree" "$LAPTOP/replica"
 check "replica index follows" same_index
 check "replica HEAD follows the branch switch" test "$(git -C "$LAPTOP/replica" symbolic-ref HEAD)" = refs/heads/feature
@@ -165,6 +174,7 @@ sleep 1
 as_ws "$WS" "echo 'server moves on' >> notes.txt"
 for _ in $(seq 40); do grep -q "quarantine" "$ROOT/follow2.log" && break; sleep 0.5; done
 check "local edit uploaded as a quarantine before being overwritten" grep -q "saved to the server as quarantine" "$ROOT/follow2.log"
+settle "$WS" "$ROOT/follow2.log"
 check "server lists the quarantine" bash -c "curl -sf -b '$ROOT/jar' '$B/api/workspaces/$WS/quarantines' | grep -q 'follower dirty'"
 QCP=$(api GET "/api/workspaces/$WS/quarantines" | json 'd[0]["CheckpointID"]')
 check "quarantined content is intact on the server" bash -c "git --git-dir='$DATA/workspaces/$WS/checkpoints.git' cat-file -p '$QCP:worktree/laptop-only.txt' | grep -q 'edited on the laptop'"
