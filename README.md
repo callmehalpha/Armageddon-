@@ -64,6 +64,8 @@ The acceptance test runs the north-star scenario on one machine:
 
 ## MVP limits
 
+The full list, including what couldn't be verified in the cloud sandbox and how to run everything on your own machine, is in [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md).
+
 - **Replicas are read-only.** Local write mode (taking the lease to your laptop) is milestone M7.
 - **The server runs as root** and drops to per-workspace users in-process. The design's separate privileged helper is milestone M3.1.
 - **No installer, automatic TLS (ACME) or self-update yet** (M5).
