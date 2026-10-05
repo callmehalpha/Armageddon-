@@ -17,6 +17,18 @@ type Server struct {
 	PublicURL string `json:"public_url"` // how clients reach the server, e.g. "https://dev.example.com"
 	TLSCert   string `json:"tls_cert,omitempty"`
 	TLSKey    string `json:"tls_key,omitempty"`
+	// TLSMode is "" (plain HTTP, or TLSCert/TLSKey when set), "files"
+	// (operator-supplied certificate), "self-signed" (IP-only mode, generated
+	// by `server init --ip-only`) or "acme" (certmagic; contract §9.2).
+	TLSMode string `json:"tls_mode,omitempty"`
+	// Domain is the ACME domain name.
+	Domain    string `json:"domain,omitempty"`
+	ACMEEmail string `json:"acme_email,omitempty"`
+	// ACMECA is the ACME directory URL; empty means Let's Encrypt production.
+	ACMECA string `json:"acme_ca,omitempty"`
+	// HTTPListen serves ACME HTTP-01 challenges and redirects to HTTPS
+	// (acme mode only). Default ":80".
+	HTTPListen string `json:"http_listen,omitempty"`
 	// CaptureIntervalMS is how often the server seat is checked for changes
 	// (polling stands in for the watcher in the MVP).
 	CaptureIntervalMS int `json:"capture_interval_ms"`
