@@ -247,7 +247,19 @@ func PublicKeyOf(secretKey []byte, password string) (string, error) {
 		return "", err
 	}
 	b, err := priv.Public().(minisign.PublicKey).MarshalText()
-	return string(b), err
+	return bareKey(b), err
+}
+
+// bareKey returns the base64 key line of a minisign public key file (the
+// form embedded with -ldflags and passed to --pubkey).
+func bareKey(text []byte) string {
+	line := ""
+	for _, l := range strings.Split(strings.TrimSpace(string(text)), "\n") {
+		if l = strings.TrimSpace(l); l != "" && !strings.HasPrefix(l, "untrusted comment:") {
+			line = l
+		}
+	}
+	return line
 }
 
 // GenerateKey creates a key pair: the encrypted secret key file contents
@@ -262,7 +274,7 @@ func GenerateKey(password string) (secret []byte, public string, err error) {
 		return nil, "", err
 	}
 	b, err := pub.MarshalText()
-	return secret, string(b), err
+	return secret, bareKey(b), err
 }
 
 // CompareVersions compares dotted versions ("0.1.0", "v0.2.0-rc1"). A

@@ -38,6 +38,21 @@ var opsCommands = map[string]func(context.Context, []string) error{
 	"update":      serverUpdate,
 	"rollback":    serverRollback,
 	"uninstall":   serverUninstall,
+	"health":      serverHealth,
+}
+
+// serverHealth waits until the local server answers /healthz (installer,
+// scripts). It reads the listen address and TLS mode from the config.
+func serverHealth(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("server health", flag.ExitOnError)
+	data := fs.String("data", config.DefaultDataDir(), "data directory")
+	timeout := fs.Duration("timeout", 10*time.Second, "how long to wait")
+	fs.Parse(args)
+	cfg, err := config.Load(*data)
+	if err != nil {
+		return err
+	}
+	return lifecycle.WaitHealthy(ctx, cfg, *timeout)
 }
 
 func serverInit(_ context.Context, args []string) error {

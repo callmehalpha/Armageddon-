@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"aead.dev/minisign"
@@ -127,6 +128,9 @@ func TestPublicKeyFileFormatAndDerivation(t *testing.T) {
 	derived, err := PublicKeyOf(secret, "pw")
 	if err != nil || derived != pub {
 		t.Fatalf("derived %q, want %q (%v)", derived, pub, err)
+	}
+	if strings.ContainsAny(pub, " \n") || !strings.HasPrefix(pub, "RW") {
+		t.Fatalf("public key should be the bare base64 line, got %q", pub)
 	}
 	if _, err := ParsePublicKey("untrusted comment: minisign public key\n" + pub + "\n"); err != nil {
 		t.Fatal(err)
