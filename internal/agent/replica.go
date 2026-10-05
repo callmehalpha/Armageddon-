@@ -120,7 +120,12 @@ func (c *Client) fetchCheckpoint(sh *gitshadow.Shadow, wsID string, seq int64, b
 // git runs git in dir with the Armageddon credential helper configured.
 func (c *Client) git(dir string, args ...string) (string, error) {
 	self, _ := os.Executable()
-	full := append([]string{"-c", "credential.helper=", "-c", "credential.helper=!" + shellQuote(self) + " git-credential"}, args...)
+	full := []string{"-c", "credential.helper=", "-c", "credential.helper=!" + shellQuote(self) + " git-credential"}
+	if c.Cfg.CertFingerprint != "" {
+		// The pinned self-signed certificate is Git's only trust anchor.
+		full = append(full, "-c", "http.sslCAInfo="+pinnedCertPath())
+	}
+	full = append(full, args...)
 	cmd := exec.Command("git", full...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
