@@ -217,97 +217,11 @@ func (c *Client) QuarantineApply(wsID, qid string, out io.Writer) error {
 	if base != "" {
 		baseTree = base + ":worktree"
 	}
-	raw, err := sh.Git(nil, "diff-tree", "-r", "-z", "--no-renames", baseTree, q+":worktree")
+	res, err := merge3(sh, st.Path, baseTree, q+":worktree", qid)
 	if err != nil {
 		return err
 	}
-	tmp, err := os.MkdirTemp("", "armageddon-merge-")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(tmp)
-	blob := func(oid string) []byte {
-		if oid == "" || strings.Trim(oid, "0") == "" {
-			return nil
-		}
-		b, _ := sh.Git(nil, "cat-file", "blob", oid)
-		return b
-	}
-	var taken, merged, conflicts, kept []string
-	f := splitNul(raw)
-	for i := 0; i+1 < len(f); i += 2 {
-		m := strings.Fields(strings.TrimPrefix(f[i], ":"))
-		bMode, tMode, bOid, tOid, path := m[0], m[1], m[2], m[3], f[i+1]
-		if bMode == "000000" {
-			bOid = ""
-		}
-		if tMode == "000000" {
-			tOid = ""
-		}
-		disk := filepath.Join(st.Path, filepath.FromSlash(path))
-		oMode, oOid, err := gitshadow.DiskBlob(disk)
-		if err != nil {
-			return err
-		}
-		if oMode == "000000" {
-			oOid = ""
-		}
-		switch {
-		case oOid == tOid && (tOid == "" || oMode == tMode):
-			// already as in the quarantine
-		case oOid == bOid && (bOid == "" || oMode == bMode):
-			// unchanged here: take the quarantine's version
-			if tOid == "" {
-				os.Remove(disk)
-			} else if err := writeFile(disk, tMode, blob(tOid)); err != nil {
-				return err
-			}
-			taken = append(taken, path)
-		case tOid == "":
-			kept = append(kept, path+" (deleted in the quarantine, changed here: kept)")
-		case oMode == "120000" || tMode == "120000" || oMode == "040000":
-			alt := disk + ".quarantine-" + qid
-			if err := writeFile(alt, tMode, blob(tOid)); err != nil {
-				return err
-			}
-			conflicts = append(conflicts, path+" (quarantine version written to "+filepath.Base(alt)+")")
-		default:
-			ours, _ := os.ReadFile(disk)
-			files := []string{filepath.Join(tmp, "ours"), filepath.Join(tmp, "base"), filepath.Join(tmp, "theirs")}
-			for i, b := range [][]byte{ours, blob(bOid), blob(tOid)} {
-				os.WriteFile(files[i], b, 0o600)
-			}
-			cmd := exec.Command("git", "merge-file", "-p", "-L", "local", "-L", "base", "-L", "quarantine "+qid, files[0], files[1], files[2])
-			res, err := cmd.Output()
-			code := 0
-			if ee, ok := err.(*exec.ExitError); ok {
-				code = ee.ExitCode()
-			} else if err != nil {
-				return err
-			}
-			mode := tMode
-			if oMode != "000000" {
-				mode = oMode
-			}
-			if code < 0 || code > 127 {
-				// binary: keep ours, put theirs beside it
-				alt := disk + ".quarantine-" + qid
-				if err := writeFile(alt, tMode, blob(tOid)); err != nil {
-					return err
-				}
-				conflicts = append(conflicts, path+" (binary; quarantine version written to "+filepath.Base(alt)+")")
-				continue
-			}
-			if err := writeFile(disk, mode, res); err != nil {
-				return err
-			}
-			if code > 0 {
-				conflicts = append(conflicts, path)
-			} else {
-				merged = append(merged, path)
-			}
-		}
-	}
+	taken, merged, conflicts, kept := res.Taken, res.Merged, res.Conflicts, res.Kept
 	for _, x := range [][2]any{{"taken from the quarantine", taken}, {"merged cleanly", merged}, {"CONFLICTS (resolve the <<<<<<< markers)", conflicts}, {"kept local", kept}} {
 		if l := x[1].([]string); len(l) > 0 {
 			fmt.Fprintf(out, "%s:\n", x[0])
@@ -348,4 +262,106 @@ func splitNul(b []byte) []string {
 		return nil
 	}
 	return strings.Split(s, "\x00")
+}
+
+// mergeResult lists what a 3-way merge did, by path.
+type mergeResult struct{ Taken, Merged, Conflicts, Kept []string }
+
+// merge3 merges the change base→theirs (two trees in the shadow) into the
+// working tree dir, where "ours" is what is on disk. Overlapping text
+// changes get conflict markers; binaries and symlinks in conflict get the
+// other version beside them; nothing both sides changed is merged silently.
+func merge3(sh *gitshadow.Shadow, dir, baseTree, theirsTree, label string) (*mergeResult, error) {
+	raw, err := sh.Git(nil, "diff-tree", "-r", "-z", "--no-renames", baseTree, theirsTree)
+	if err != nil {
+		return nil, err
+	}
+	tmp, err := os.MkdirTemp("", "armageddon-merge-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(tmp)
+	blob := func(oid string) []byte {
+		if oid == "" || strings.Trim(oid, "0") == "" {
+			return nil
+		}
+		b, _ := sh.Git(nil, "cat-file", "blob", oid)
+		return b
+	}
+	res := &mergeResult{}
+	f := splitNul(raw)
+	for i := 0; i+1 < len(f); i += 2 {
+		m := strings.Fields(strings.TrimPrefix(f[i], ":"))
+		bMode, tMode, bOid, tOid, path := m[0], m[1], m[2], m[3], f[i+1]
+		if bMode == "000000" {
+			bOid = ""
+		}
+		if tMode == "000000" {
+			tOid = ""
+		}
+		disk := filepath.Join(dir, filepath.FromSlash(path))
+		oMode, oOid, err := gitshadow.DiskBlob(disk)
+		if err != nil {
+			return nil, err
+		}
+		if oMode == "000000" {
+			oOid = ""
+		}
+		switch {
+		case oOid == tOid && (tOid == "" || oMode == tMode):
+			// already as in the quarantine
+		case oOid == bOid && (bOid == "" || oMode == bMode):
+			// unchanged here: take the quarantine's version
+			if tOid == "" {
+				os.Remove(disk)
+			} else if err := writeFile(disk, tMode, blob(tOid)); err != nil {
+				return nil, err
+			}
+			res.Taken = append(res.Taken, path)
+		case tOid == "":
+			res.Kept = append(res.Kept, path+" (deleted in the quarantine, changed here: kept)")
+		case oMode == "120000" || tMode == "120000" || oMode == "040000":
+			alt := disk + ".quarantine-" + label
+			if err := writeFile(alt, tMode, blob(tOid)); err != nil {
+				return nil, err
+			}
+			res.Conflicts = append(res.Conflicts, path+" (quarantine version written to "+filepath.Base(alt)+")")
+		default:
+			ours, _ := os.ReadFile(disk)
+			files := []string{filepath.Join(tmp, "ours"), filepath.Join(tmp, "base"), filepath.Join(tmp, "theirs")}
+			for i, b := range [][]byte{ours, blob(bOid), blob(tOid)} {
+				os.WriteFile(files[i], b, 0o600)
+			}
+			cmd := exec.Command("git", "merge-file", "-p", "-L", "local", "-L", "base", "-L", "quarantine "+label, files[0], files[1], files[2])
+			content, err := cmd.Output()
+			code := 0
+			if ee, ok := err.(*exec.ExitError); ok {
+				code = ee.ExitCode()
+			} else if err != nil {
+				return nil, err
+			}
+			mode := tMode
+			if oMode != "000000" {
+				mode = oMode
+			}
+			if code < 0 || code > 127 {
+				// binary: keep ours, put theirs beside it
+				alt := disk + ".quarantine-" + label
+				if err := writeFile(alt, tMode, blob(tOid)); err != nil {
+					return nil, err
+				}
+				res.Conflicts = append(res.Conflicts, path+" (binary; quarantine version written to "+filepath.Base(alt)+")")
+				continue
+			}
+			if err := writeFile(disk, mode, content); err != nil {
+				return nil, err
+			}
+			if code > 0 {
+				res.Conflicts = append(res.Conflicts, path)
+			} else {
+				res.Merged = append(res.Merged, path)
+			}
+		}
+	}
+	return res, nil
 }
