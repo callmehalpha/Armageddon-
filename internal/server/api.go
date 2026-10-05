@@ -46,6 +46,15 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/workspaces/{id}/quarantines", s.requireUser(s.member(s.handleQuarantines)))
 	mux.HandleFunc("POST /api/workspaces/{id}/sync", s.requireUser(s.member(s.handleSyncNow)))
 	mux.HandleFunc("GET /api/workspaces/{id}/terminal", s.requireUser(s.member(s.handleTerminal)))
+	// Browser IDE: every method and subpath, proxied to the workspace's
+	// code-server after the same user + membership checks.
+	mux.HandleFunc("/api/workspaces/{id}/ide/", s.requireUser(s.member(s.handleIDE)))
+	// Git-provider credentials and the SSH endpoint
+	mux.HandleFunc("GET /api/credentials", s.requireUser(s.handleListCredentials))
+	mux.HandleFunc("POST /api/credentials", s.requireUser(s.handleCreateCredential))
+	mux.HandleFunc("DELETE /api/credentials/{id}", s.requireUser(s.handleDeleteCredential))
+	mux.HandleFunc("POST /api/admin/data-key/rotate", s.requireAdmin(s.handleRotateDataKey))
+	mux.HandleFunc("GET /api/ssh", s.requireUser(s.handleSSHInfo))
 	// Git and web UI
 	mux.HandleFunc("/git/", s.serveGit)
 	mux.HandleFunc("GET /healthz", func(rw http.ResponseWriter, r *http.Request) { rw.Write([]byte("ok\n")) })
@@ -81,7 +90,8 @@ func (s *Server) member(h wsHandler) http.HandlerFunc {
 func (s *Server) wsJSON(w *store.Workspace, role string) map[string]any {
 	out := map[string]any{"id": w.ID, "name": w.Name, "slug": w.Slug, "state": w.State, "state_reason": w.StateReason,
 		"source_url": w.SourceURL, "role": role, "checkpoint_seq": w.CheckpointSeq, "current_checkpoint": w.CurrentCheckpoint,
-		"git_url": s.cfg.PublicURL + "/git/" + w.ID + ".git", "created_at": w.CreatedAt}
+		"git_url": s.cfg.PublicURL + "/git/" + w.ID + ".git", "created_at": w.CreatedAt,
+		"ide_path": "/api/workspaces/" + w.ID + "/ide/", "ide_running": s.ide.running(w.ID)}
 	if l, err := s.store.LeaseOf(nil, w.ID); err == nil {
 		out["lease"] = map[string]any{"holder_kind": l.HolderKind, "holder_device": l.HolderDevice, "epoch": l.Epoch}
 	}

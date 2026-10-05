@@ -30,9 +30,8 @@ func (s *Server) handleTerminal(rw http.ResponseWriter, r *http.Request, w *stor
 		writeErr(rw, 503, "workspace not running")
 		return
 	}
-	lease, err := s.store.LeaseOf(nil, w.ID)
-	if err != nil || lease.HolderKind != "server" {
-		writeErr(rw, 409, "the workspace is owned by a device; the server seat is read-only until it is handed back")
+	if !s.serverHoldsLease(w.ID) {
+		writeErr(rw, 409, leaseRefusal)
 		return
 	}
 	// websocket.Accept enforces a same-origin check, which is the CSRF
@@ -57,14 +56,16 @@ func (s *Server) handleTerminal(rw http.ResponseWriter, r *http.Request, w *stor
 	}
 	cmd := exec.Command(shell, "-l")
 	cmd.Dir = rt.p.Tree
-	rt.acct.Prepare(cmd,
-		"TERM=xterm-256color",
-		"SHELL="+shell,
-		"ARMAGEDDON_WORKSPACE="+w.Name,
-		// P-13: interactive shells get the trash hooks through the
-		// environment, not only through repo config.
-		"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=core.hooksPath", "GIT_CONFIG_VALUE_0="+rt.p.Hooks,
-	)
+	// Git-provider credentials for this user, served on per-session sockets
+	// (plan M4.5); nothing is written into the workspace.
+	creds, err := s.openSeatCredentials(rt, userOf(r).ID)
+	if err != nil {
+		c.Close(websocket.StatusInternalError, "credentials: "+err.Error())
+		return
+	}
+	defer creds.Close()
+	// SpawnInWorkspace(kind=pty-shell)
+	rt.acct.Prepare(cmd, seatEnv(rt, w, creds.GitConfig(), append(creds.Env(), "TERM=xterm-256color", "SHELL="+shell)...)...)
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
