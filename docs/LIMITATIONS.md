@@ -58,6 +58,7 @@ go build -o armageddon ./cmd/armageddon
 sudo install -m 0755 armageddon /usr/local/bin/armageddon
 sudo mkdir -p /srv && sudo chmod 755 /srv
 sudo test/e2e/mvp.sh /usr/local/bin/armageddon # acceptance test: expect "ALL MVP ACCEPTANCE CHECKS PASSED"
+sudo test/integration/escape.sh /usr/local/bin/armageddon  # privilege boundary (phase 2 on): expect "ALL ESCAPE-MATRIX CHECKS PASSED"
 ```
 
 Optional browser test, run against a fresh server. The setup URL is printed by `server run`:
@@ -109,7 +110,7 @@ The commands for P6 (privilege boundary) and P8 (SSH endpoint) are *pending* the
 
 | # | Limitation | Workaround now | Planned fix |
 |---|------------|----------------|-------------|
-| B1 | **The server runs as root** and drops to workspace users in-process | Run on a dedicated VM | Phase 2: `armageddon helper` as root with only the allowlisted API; the server runs as `armageddon` |
+| B1 | ~~**The server runs as root**~~ Fixed in Phase 2: `armageddon helper` runs as root with only the allowlisted API; the server runs as `armageddon` | — | Done (M3.1); merges after the P6 verdict |
 | B2 | **Replicas are read-only**; no local write mode | Work in the browser terminal on the server; local edits are quarantined, not lost | Phase 3: `armageddon work local` / `work remote` |
 | B3 | **No installer, ACME, update, backup or restore** | `server init/run` with `--tls-cert/--tls-key` or a reverse proxy; back up `/var/lib/armageddon` while the server is stopped | Phase 4 |
 | B4 | **No code-server or SSH endpoint** | Browser terminal | Phase 5. SSH stays off by default until P8 passes |
@@ -142,7 +143,11 @@ Each phase adds its own limitations here when its PR opens.
 - **Phase 1 (validate):** partial so far.
   - P2 cross-platform focus cases: Linux ↔ Linux 7/7 match, 0 silent mismatches. macOS results come from CI.
   - P6 helper core (typed protocol, socket peer check, `openat2`, Compose validator) is built and unit-tested. The end-to-end run, escape checks, verdict and P8 are in progress.
-- **Phase 2 (privilege split):** *pending*.
+- **Phase 2 (privilege split):** helper, server switch, e2e and the escape matrix pass in the sandbox. Open points:
+  - cgroups ran only in degraded mode here (hybrid host, A1): per-workspace cgroups, `SetWorkspaceLimits` and cgroup-based `SignalWorkspace(all)` are untested on a real cgroup v2 host. `SignalWorkspace(all)` also scans `/proc` by uid, which is what was tested.
+  - E5 covers push, fetch and capture. The server has no `fsck` path yet in v0.1 (only `receive.fsckObjects` inside `receive-pack`, which runs as `ws-<id>`).
+  - Each workspace command costs one extra process (the `helper-exec` shim) and one helper round trip; the overhead is not measured yet.
+  - The tests still leave `ws-*` users behind (B9).
 - **Phase 3 (local write mode):** *pending*.
 - **Phase 4 (install and ops):** *pending*.
 - **Phase 5 (remote IDE):** *pending*.
