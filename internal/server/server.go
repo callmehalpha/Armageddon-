@@ -30,6 +30,8 @@ type Server struct {
 	mu  sync.Mutex
 	rts map[string]*runtime // per-workspace runtime, by workspace ID
 
+	sessions sessionRegistry // interactive server-seat sessions (§4.3)
+
 	ctx context.Context
 }
 
