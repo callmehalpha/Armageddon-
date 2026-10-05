@@ -241,7 +241,12 @@ func (s *Server) importWorkspace(w *store.Workspace, owner *store.User) error {
 			return err
 		}
 		// An initial empty commit so HEAD, the index delta and replicas all
-		// have a commit to work against.
+		// have a commit to work against. The empty tree is written as a real
+		// object first: Git only pretends it exists, and `git fsck` reports
+		// it missing otherwise (found by doctor).
+		if err := run(p.Repo, "hash-object", "-w", "-t", "tree", "/dev/null"); err != nil {
+			return err
+		}
 		cmd := a.Command(p.Repo, "git", "commit-tree", gitshadow.EmptyTree, "-m", "Initial commit (created by Armageddon)")
 		out, err := cmd.Output()
 		if err != nil {

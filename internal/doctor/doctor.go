@@ -317,7 +317,15 @@ func CheckCgroup(e *Env) Result {
 }
 
 func probeOpenat2(dir string) error {
-	fd, err := unix.Openat2(unix.AT_FDCWD, dir, &unix.OpenHow{
+	// RESOLVE_BENEATH rejects absolute paths (EXDEV): resolve "." beneath
+	// a descriptor for the directory, the way the helper resolves
+	// workspace paths beneath the data directory.
+	dfd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(dfd)
+	fd, err := unix.Openat2(dfd, ".", &unix.OpenHow{
 		Flags: unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC, Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS})
 	if err == nil {
 		unix.Close(fd)
@@ -428,13 +436,16 @@ func CheckFsck(e *Env, wss []wsRow) Result {
 		r.Status, r.Detail = Skip, "no ready workspaces"
 		return r
 	}
-	var bad, names []string
+	var bad, names, repaired []string
+	emptyTreeOnly := true
 	for _, w := range cands {
 		names = append(names, w.Slug)
-		if out, err := e.cpsGit(w.ID, "fsck", "--no-progress", "--connectivity-only"); err != nil {
-			bad = append(bad, fmt.Sprintf("%s checkpoints.git: %s", w.Slug, firstLine(out, err)))
-		}
 		root := filepath.Join(e.DataDir, "workspaces", w.ID)
+		asServer := func(args ...string) *exec.Cmd {
+			cmd := exec.Command(e.Git, append([]string{"--git-dir=" + filepath.Join(root, "checkpoints.git")}, args...)...)
+			cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1")
+			return cmd
+		}
 		name := w.OSUser
 		if name == "" {
 			name = sysuser.NameFor(w.ID)
@@ -442,22 +453,71 @@ func CheckFsck(e *Env, wss []wsRow) Result {
 		acct, err := e.Account(name, filepath.Join(root, "home"))
 		if err != nil {
 			bad = append(bad, fmt.Sprintf("%s: workspace user: %v", w.Slug, err))
+			emptyTreeOnly = false
 			continue
 		}
-		cmd := acct.Command(root, e.Git, "--git-dir="+filepath.Join(root, "repo.git"), "fsck", "--no-progress", "--connectivity-only")
-		cmd.Env = append(cmd.Env, "GIT_CONFIG_NOSYSTEM=1")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			bad = append(bad, fmt.Sprintf("%s repo.git: %s", w.Slug, firstLine(out, err)))
+		asWS := func(args ...string) *exec.Cmd {
+			cmd := acct.Command(root, e.Git, append([]string{"--git-dir=" + filepath.Join(root, "repo.git")}, args...)...)
+			cmd.Env = append(cmd.Env, "GIT_CONFIG_NOSYSTEM=1")
+			return cmd
+		}
+		for _, repo := range []struct {
+			name string
+			git  func(...string) *exec.Cmd
+		}{{"checkpoints.git", asServer}, {"repo.git", asWS}} {
+			out, err := repo.git("fsck", "--no-progress", "--connectivity-only").CombinedOutput()
+			if err == nil {
+				continue
+			}
+			// Workspaces created before this fix referenced Git's implicit
+			// empty tree without writing it: harmless, and repairable.
+			if isMissingEmptyTreeOnly(out) {
+				if e.Repair {
+					if werr := repo.git("hash-object", "-w", "-t", "tree", "/dev/null").Run(); werr == nil {
+						if repo.git("fsck", "--no-progress", "--connectivity-only").Run() == nil {
+							repaired = append(repaired, w.Slug+" "+repo.name)
+							continue
+						}
+					}
+				}
+			} else {
+				emptyTreeOnly = false
+			}
+			bad = append(bad, fmt.Sprintf("%s %s: %s", w.Slug, repo.name, firstLine(out, err)))
 		}
 	}
 	if len(bad) > 0 {
 		r.Status, r.Detail = Fail, strings.Join(bad, "; ")
 		r.Remedy = "Repository corruption (F10). Restore the objects from a device replica (`git fetch` from it into the server) or from the latest backup (`armageddon server restore` onto a fresh data directory, then copy the workspace)."
+		if emptyTreeOnly {
+			r.Remedy = "Only Git's empty tree object is missing (workspaces created by v0.1.0-mvp); no data is affected. Run `armageddon doctor --repair` to write it."
+		}
+		return r
+	}
+	if len(repaired) > 0 {
+		r.Status, r.Detail = Repaired, "wrote the missing empty tree in "+strings.Join(repaired, ", ")
 		return r
 	}
 	r.Status, r.Detail = OK, "clean: "+strings.Join(names, ", ")
 	return r
 }
+
+func isMissingEmptyTreeOnly(out []byte) bool {
+	found := false
+	for _, l := range strings.Split(string(out), "\n") {
+		l = strings.TrimSpace(l)
+		switch {
+		case l == "" || strings.HasPrefix(l, "notice:") || strings.HasPrefix(l, "dangling "):
+		case l == "missing tree "+emptyTree:
+			found = true
+		default:
+			return false
+		}
+	}
+	return found
+}
+
+const emptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 func firstLine(out []byte, err error) string {
 	s := ""

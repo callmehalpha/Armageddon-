@@ -3,6 +3,7 @@ package doctor
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net"
 	"os"
 	"os/exec"
@@ -199,8 +200,10 @@ func TestCgroupAndOpenat2(t *testing.T) {
 	flagged(t, CheckCgroup(&f.env), Warn, "Delegate")
 	f.env.Openat2 = func(string) error { return unix.ENOSYS }
 	flagged(t, CheckOpenat2(&f.env), Warn, "5.6")
-	// The real probe works on this kernel or reports ENOSYS; either way it must not panic.
-	_ = probeOpenat2(f.data)
+	// The real probe works on this kernel (5.6+) or reports ENOSYS.
+	if err := probeOpenat2(f.data); err != nil && !errors.Is(err, unix.ENOSYS) {
+		t.Fatalf("openat2 probe: %v", err)
+	}
 }
 
 func TestFsckFindsCorruption(t *testing.T) {
@@ -242,6 +245,25 @@ func TestReconcile(t *testing.T) {
 	// The DB points at a checkpoint that does not exist: cannot be repaired.
 	os.Remove(filepath.Join(f.cps, "objects", f.current[:2], f.current[2:]))
 	flagged(t, CheckReconcile(&f.env, wss)[0], Fail, "backup")
+}
+
+func TestMissingEmptyTreeRepaired(t *testing.T) {
+	f := newFixture(t)
+	repo := filepath.Join(filepath.Dir(f.cps), "repo.git")
+	// v0.1.0-mvp wrote the initial commit against Git's implicit empty tree.
+	if err := os.Remove(filepath.Join(repo, "objects", emptyTree[:2], emptyTree[2:])); err != nil {
+		t.Fatal(err)
+	}
+	wss, _ := workspaces(f.data)
+	flagged(t, CheckFsck(&f.env, wss), Fail, "doctor --repair")
+	f.env.Repair = true
+	if r := CheckFsck(&f.env, wss); r.Status != Repaired {
+		t.Fatalf("repair: %+v", r)
+	}
+	f.env.Repair = false
+	if r := CheckFsck(&f.env, wss); r.Status != OK {
+		t.Fatalf("after repair: %+v", r)
+	}
 }
 
 func TestMissingDatabase(t *testing.T) {
