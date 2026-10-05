@@ -144,7 +144,9 @@ func TestSSHExecPTYAndLease(t *testing.T) {
 	if ee, ok := err.(*ssh.ExitError); !ok || ee.ExitStatus() != 7 {
 		t.Fatalf("exit status: %v", err)
 	}
-	if len(lines) != 3 || lines[0] != strconv.Itoa(int(rt.acct.UID)) || lines[1] != rt.p.Tree || lines[2] != "demo" {
+	// pwd reports the resolved path; on macOS /tmp is a symlink to /private/tmp.
+	tree, _ := filepath.EvalSymlinks(rt.p.Tree)
+	if len(lines) != 3 || lines[0] != strconv.Itoa(int(rt.acct.UID)) || (lines[1] != rt.p.Tree && lines[1] != tree) || lines[2] != "demo" {
 		t.Fatalf("exec output %q (want uid %d in %s)", out, rt.acct.UID, rt.p.Tree)
 	}
 	// stdin reaches the process
