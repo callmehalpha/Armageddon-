@@ -46,6 +46,7 @@ function nav() {
   n.replaceChildren(
     h("a", { href: "/", "data-nav": "" }, "Workspaces"),
     h("a", { href: "/devices", "data-nav": "" }, "Devices"),
+    h("a", { href: "/credentials", "data-nav": "" }, "Git credentials"),
     me.role === "admin" ? h("a", { href: "/admin", "data-nav": "" }, "Users") : null,
     h("span", { class: "muted", style: "margin-left:14px" }, me.username),
     h("button", { class: "ghost", onclick: async () => { await api("POST", "/api/logout"); me = null; go("/"); } }, "Log out"));
@@ -69,6 +70,7 @@ async function route() {
   }
   if (path === "/pair") return pairPage(q.get("code") || "");
   if (path === "/devices") return devicesPage();
+  if (path === "/credentials") return credentialsPage();
   if (path === "/admin") return adminPage();
   const m = path.match(/^\/w\/([A-Z0-9]+)$/);
   if (m) return workspacePage(m[1]);
@@ -143,8 +145,13 @@ async function workspacePage(id) {
   const cloneCmd = "armageddon clone " + w.id;
   render(
     h("h1", {}, w.name, " ", h("span", { class: "pill ready" }, "ready")),
-    h("div", { class: "banner" }, "Workspace is owned by ", h("strong", {}, holder), ` · epoch ${w.lease.epoch} · `,
-      h("span", { class: "muted" }, w.source_url || "empty workspace")),
+    h("div", { class: "banner toolbar" },
+      h("span", {}, "Workspace is owned by ", h("strong", {}, holder), ` · epoch ${w.lease.epoch} · `,
+        h("span", { class: "muted" }, w.source_url || "empty workspace")),
+      w.lease.holder_kind === "server"
+        ? h("a", { class: "button", id: "open-ide", href: w.ide_path, target: "_blank", rel: "noopener",
+            title: "VS Code in the browser (code-server), running as this workspace's user" }, "Open IDE")
+        : null),
     termBox,
     h("div", { class: "grid", style: "margin-top:14px" },
       h("div", { class: "card" }, h("h2", {}, "Checkpoints"),
@@ -214,13 +221,58 @@ async function devicesPage() {
     } }, "Revoke"))));
 }
 
+async function credentialsPage() {
+  const body = h("tbody"), err = h("div", { class: "err" }), out = h("div");
+  const host = h("input", { placeholder: "provider host, e.g. github.com", required: "" });
+  const kind = h("select", {}, h("option", { value: "https-token" }, "HTTPS token (PAT)"), h("option", { value: "ssh-key" }, "Generate SSH key"));
+  const user = h("input", { placeholder: "username (optional)" });
+  const token = h("input", { type: "password", placeholder: "personal access token", autocomplete: "off" });
+  const sync = () => { const pat = kind.value === "https-token"; user.style.display = token.style.display = pat ? "" : "none"; };
+  kind.addEventListener("change", sync); sync();
+  const form = h("form", { class: "row", onsubmit: async (e) => {
+    e.preventDefault(); err.textContent = ""; out.replaceChildren();
+    try {
+      const c = await api("POST", "/api/credentials", { host: host.value, kind: kind.value, username: user.value, token: token.value });
+      token.value = "";
+      if (c.public_key) out.append(h("p", {}, "Add this public key to your account on " + c.host + ":"), h("pre", { class: "cmd" }, c.public_key));
+      load();
+    } catch (x) { err.textContent = x.message; }
+  } }, host, kind, user, token, h("button", { type: "submit" }, "Add"));
+  render(h("h1", {}, "Git provider credentials"),
+    h("div", { class: "card" },
+      h("p", { class: "muted" }, "Used by git push/pull in the browser terminal and SSH sessions on the server. " +
+        "Secrets are encrypted on the server, never shown again, and never written into a workspace."),
+      form, err, out),
+    h("div", { class: "card" }, h("table", {},
+      h("thead", {}, h("tr", {}, h("th", {}, "Host"), h("th", {}, "Kind"), h("th", {}, "Details"), h("th", {}, "Added"), h("th", {}))), body)));
+  async function load() {
+    const cs = await api("GET", "/api/credentials");
+    body.replaceChildren();
+    if (!cs.length) body.append(h("tr", {}, h("td", { colspan: "5", class: "muted" }, "No stored credentials.")));
+    for (const c of cs) body.append(h("tr", {}, h("td", {}, c.host), h("td", {}, c.kind === "ssh-key" ? "SSH key" : "HTTPS token"),
+      h("td", { class: "mono muted" }, c.kind === "ssh-key" ? c.fingerprint : "user " + c.username),
+      h("td", { class: "muted" }, ago(c.created_at)),
+      h("td", {}, h("button", { class: "ghost", onclick: async () => {
+        if (confirm("Remove the " + c.host + " credential?")) { await api("DELETE", "/api/credentials/" + c.id); load(); }
+      } }, "Remove"))));
+  }
+  load();
+}
+
 async function adminPage() {
   const out = h("div");
   render(h("h1", {}, "Users"), h("div", { class: "card" },
     h("button", { onclick: async () => {
       const d = await api("POST", "/api/invites");
       out.replaceChildren(h("p", {}, "Send this one-time link (valid " + d.expires_in + "):"), h("pre", { class: "cmd" }, d.url));
-    } }, "Create invite link"), out), h("div", { class: "card" }, h("table", { id: "users" })));
+    } }, "Create invite link"), out), h("div", { class: "card" }, h("table", { id: "users" })),
+    h("div", { class: "card" }, h("h2", {}, "Server data key"),
+      h("p", { class: "muted" }, "Encrypts stored Git credentials. Rotating re-encrypts them all with a new key and deletes the old one."),
+      h("button", { onclick: async (e) => {
+        if (!confirm("Rotate the data key now?")) return;
+        const d = await api("POST", "/api/admin/data-key/rotate");
+        e.target.replaceWith(h("p", { class: "ok" }, `Rotated: ${d.resealed} credential(s) re-encrypted with key ${d.active_key}.`));
+      } }, "Rotate data key")));
   const us = await api("GET", "/api/users");
   document.getElementById("users").append(...us.map(u => h("tr", {}, h("td", {}, u.username), h("td", { class: "muted" }, u.role))));
 }
