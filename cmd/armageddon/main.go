@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
 	"github.com/callmehalpha/Armageddon-/internal/agent"
 	"github.com/callmehalpha/Armageddon-/internal/config"
+	"github.com/callmehalpha/Armageddon-/internal/helper"
 	"github.com/callmehalpha/Armageddon-/internal/server"
 )
 
@@ -22,7 +24,8 @@ const usage = `armageddon — your development environment survives the machine.
 
 Server:
   armageddon server init  [--data DIR] [--listen ADDR] [--public-url URL] [--tls-cert F --tls-key F]
-  armageddon server run   [--data DIR]
+  armageddon server run   [--data DIR] [--helper-socket PATH] [--dev]
+  armageddon helper       [--data DIR] [--socket PATH] [--server-user NAME]   (as root)
 
 Device:
   armageddon login <server-url> [--name NAME]   pair this machine (approve in the browser)
@@ -50,6 +53,12 @@ func main() {
 		fmt.Println("armageddon", version)
 	case "server":
 		err = serverCmd(ctx, args)
+	case "helper":
+		err = helperCmd(ctx, args)
+	case "helper-exec": // internal: the server's shim into the helper
+		os.Exit(helper.ShimMain(args))
+	case "helper-nnp": // internal: run by the helper as ws-<id>
+		os.Exit(helper.NNPMain(args))
 	case "hook":
 		if len(args) == 0 {
 			os.Exit(2)
@@ -180,6 +189,8 @@ func serverCmd(ctx context.Context, args []string) error {
 	public := fs.String("public-url", "", "URL clients use to reach this server")
 	cert := fs.String("tls-cert", "", "TLS certificate file")
 	key := fs.String("tls-key", "", "TLS key file")
+	helperSock := fs.String("helper-socket", "", "privileged helper socket (default "+helper.DefaultSocket+")")
+	dev := fs.Bool("dev", false, "development mode: no helper, everything runs as the current user (no isolation)")
 	fs.Parse(args[1:])
 	switch args[0] {
 	case "init":
@@ -202,18 +213,77 @@ func serverCmd(ctx context.Context, args []string) error {
 		fmt.Printf("Wrote %s\nStart the server with: armageddon server run --data %s\n", config.Path(*data), *data)
 		return nil
 	case "run":
-		cfg, err := config.Load(*data)
+		abs, err := filepath.Abs(*data)
+		if err != nil {
+			return err
+		}
+		client, runDir, err := pickHelper(abs, *helperSock, *dev)
+		if err != nil {
+			return err
+		}
+		// An MVP data directory was written by a root server: hand it to
+		// this user before reading the (root-only) config and database.
+		if err := server.UpgradeDataDir(ctx, abs, client); err != nil {
+			return err
+		}
+		cfg, err := config.Load(abs)
 		if err != nil {
 			return fmt.Errorf("%v (run `armageddon server init --data %s` first)", err, *data)
 		}
 		if *listen != "" {
 			cfg.Listen = *listen
 		}
-		s, err := server.New(cfg)
+		if cfg.RunDir != "" {
+			runDir = cfg.RunDir
+		}
+		s, err := server.New(cfg, server.WithHelper(client), server.WithRunDir(runDir))
 		if err != nil {
 			return err
 		}
 		return s.Run(ctx)
 	}
 	return fmt.Errorf("unknown server command %q", args[0])
+}
+
+// pickHelper chooses how the server reaches privileged operations: the
+// helper socket when it exists (production), else the in-process dev
+// helper when not root. A root server without a helper is refused: it
+// would run workspace processes as root.
+func pickHelper(dataDir, sock string, dev bool) (helper.Client, string, error) {
+	if dev {
+		return helper.NewDev(dataDir), "", nil
+	}
+	explicit := sock != ""
+	if !explicit {
+		sock = helper.DefaultSocket
+	}
+	if helper.Reachable(sock) {
+		exe, err := os.Executable()
+		if err != nil {
+			return nil, "", err
+		}
+		return &helper.Socket{Path: sock, DataDir: dataDir, Shim: exe}, filepath.Dir(sock), nil
+	}
+	if explicit {
+		return nil, "", fmt.Errorf("no helper socket at %s (start `armageddon helper` as root first)", sock)
+	}
+	if os.Geteuid() == 0 {
+		return nil, "", fmt.Errorf("refusing to run the server as root: start `armageddon helper --data %s` as root and run the server as the armageddon user (or pass --dev for an unisolated development server)", dataDir)
+	}
+	return helper.NewDev(dataDir), "", nil
+}
+
+// helperCmd runs the privileged helper (contract §2.5). It must run as
+// root; it serves only the server user.
+func helperCmd(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("helper", flag.ExitOnError)
+	data := fs.String("data", "/var/lib/armageddon", "the server's data directory")
+	sock := fs.String("socket", helper.DefaultSocket, "socket path (its directory also holds the per-workspace sockets)")
+	user := fs.String("server-user", "armageddon", "the user the server runs as")
+	fs.Parse(args)
+	d, err := helper.NewDaemon(*data, *sock, *user)
+	if err != nil {
+		return err
+	}
+	return d.Serve(ctx)
 }
