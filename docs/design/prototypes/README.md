@@ -11,7 +11,7 @@ Prototypes P1, P2, P4 and P5 from [§11 of the v0.1 design](../v0.1-architecture
 | Prototype | Question | Verdict | Detail |
 |-----------|----------|---------|--------|
 | **P1** | Is git-shadow capture fast enough for continuous checkpoints? | **Pass at 5k and 50k; marginal at 200k** (only with scoped capture: 896 ms p95 vs a 1 s target). Found the transport bug ⟨P-1⟩. Storage criterion replaced | [P1-capture-perf.md](P1-capture-perf.md) |
-| **P2** | Does capture → apply round-trip byte-exactly? | **Pass on Linux ↔ Linux.** 10,000 sequences, 149,998 rounds, 33,568 crash resumes; 0 working-tree mismatches; 1 index-only edge case originating in Git. macOS: runs in CI from Phase 1 (see the P2 write-up) | [P2-roundtrip.md](P2-roundtrip.md) |
+| **P2** | Does capture → apply round-trip byte-exactly? | **Pass on Linux ↔ Linux.** 10,000 sequences, 149,998 rounds, 33,568 crash resumes; 0 working-tree mismatches; 1 index-only edge case originating in Git. **macOS (Phase 1, CI): FAIL.** 0 silent mismatches, but case-only renames captured on APFS keep the old-case path, so Linux replicas get duplicate files, and apply on APFS refuses case-only renames and stays stuck; 11 of 30 fuzz sequences fail at the initial seed (⟨P-20⟩) | [P2-roundtrip.md](P2-roundtrip.md) |
 | **P4** | Can crashes or partitions lose acknowledged or unacknowledged work? | **Pass** after 3 protocol additions (the original protocol was safe but could stall) | [P4-failure-model.md](P4-failure-model.md) |
 | **P5** | Can the server host the canonical repo with authz, fencing and trash refs? | **Pass, 13 of 13 scenarios**, after replacing CGI with a native smart-HTTP front end. Overhead +0.3–0.9% | [P5-git-hosting.md](P5-git-hosting.md) |
 | **P6** *(Phase 1)* | Is the §2.5 boundary practical: root helper with a typed API, unprivileged server, one user per workspace? | **Partial.** Helper works end to end (PTY, git-service and capture run as `ws-<id>` with `NoNewPrivs`); decoder fuzzed; Compose parser rejects the listed fields. +3.5 ms per spawn, mostly the Go trampoline. **Escape matrix E1–E7/E9, code-server, full HTTP push/fetch and the Docker variant not done.** cgroup v2 limits unavailable on this host (hybrid hierarchy) | [P6-privilege-boundary.md](P6-privilege-boundary.md) |
@@ -42,11 +42,13 @@ Each change says where it lands in the contract and what evidence supports it.
 | ⟨P-17⟩ | **Helper start-up capability checks:** no cgroup v2 memory/pids → run without limits, `doctor` warns, `SignalWorkspace(all)` signals by uid; no `openat2` → refuse to start. | §2.5, §9.2 | P6: hybrid hierarchy on the test host |
 | ⟨P-18⟩ | **Loopback-only SSH forwarding does not isolate workspaces** (it is dialled in the host network namespace). Target: a per-workspace network namespace; document it as a limitation if v0.1 ships SSH before then. | §2.3, §2.5 | P8 design review |
 | ⟨P-19⟩ | **SFTP and every SSH session channel run as spawned `ws-<id>` processes,** never inside the server. | §2.5 | P8 checks 8–9 |
+| ⟨P-20⟩ | **Case- and normalisation-aware capture and apply:** capture reconciles index entries with real `readdir` names on insensitive filesystems; apply does case-only renames through a temporary name, and refuses up front any checkpoint whose paths collide under the replica's filesystem rules. | §6.3, §6.5 | P2 macOS CI: old-case paths persist in macOS checkpoints; APFS apply stuck on case-only rename |
 
 ## Still open
 
 - **G0.5:** product-owner review of ⟨P-1⟩–⟨P-14⟩. Each accepted change is applied to `v0.1-architecture.md` in PR #1.
-- **G1:** product-owner review of ⟨P-15⟩–⟨P-19⟩ (Phase 1).
+- **G1:** product-owner review of ⟨P-15⟩–⟨P-20⟩ (Phase 1).
+- **P2 on macOS:** fix per ⟨P-20⟩ and rerun; diagnose the 11 of 30 initial-seed failures (rerun with `-keep`); run the full 10,000-sequence `workflow_dispatch` budget once seeding passes.
 - **P6** (privilege boundary) must complete before implementation milestone M3. Still open: the escape matrix (E1–E7, E9), code-server through the helper, full HTTP push/fetch through the helper, and the Docker variant.
 - **P8 with real IDEs** (VS Code Remote-SSH, JetBrains Gateway).
 - **macOS:** P2 on APFS now runs in CI (the `p2-macos` workflow; results are in the macOS section of [P2-roundtrip.md](P2-roundtrip.md)). P1 with git's built-in fsmonitor is still open.
