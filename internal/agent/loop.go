@@ -456,11 +456,19 @@ func (r *replica) applyOne(seq int64, reason string) error {
 		return err
 	}
 	err = sh.Apply(from, cp, gitshadow.ApplyOptions{})
-	if errors.Is(err, gitshadow.ErrDiverged) || (err != nil && strings.Contains(err.Error(), "diverged")) {
-		if _, qerr := r.quarantineLocal(reason); qerr != nil {
+	// Diverged: quarantine the local state, then apply *from that capture*
+	// with the same verification. Never Seed here: an edit made between
+	// the quarantine's capture and the overwrite would be lost (found by
+	// the conformance suite). If the user keeps editing, quarantine again.
+	for i := 0; i < 5 && (errors.Is(err, gitshadow.ErrDiverged) || (err != nil && strings.Contains(err.Error(), "diverged"))); i++ {
+		q, qerr := r.quarantineLocal(reason)
+		if qerr != nil {
 			return fmt.Errorf("local edits found but not saved for quarantine (%v); not overwriting them", qerr)
 		}
-		err = sh.Seed(cp)
+		if q != "" {
+			from = q
+		}
+		err = sh.Apply(from, cp, gitshadow.ApplyOptions{})
 	}
 	if err != nil {
 		return err

@@ -100,20 +100,20 @@ func (s *Server) syncSeatLocked(rt *runtime) error {
 	if err := rt.seat.ReceivePack(pack, "refs/seat/applied", cur); err != nil {
 		return err
 	}
-	seed := base == ""
-	if !seed {
+	from := base // "" seeds (legacy workspaces without a recorded base)
+	if base != "" {
 		st, err := s.seatState(rt)
 		if err != nil {
 			return err
 		}
-		prev, err := rt.seat.StateOf(base)
-		if err != nil {
-			seed = true
+		if prev, err := rt.seat.StateOf(base); err != nil {
+			from = ""
 		} else if st.Tree != prev.Tree {
-			if err := s.quarantineSeat(rt, st, base); err != nil {
+			q, err := s.quarantineSeat(rt, st, base)
+			if err != nil {
 				return fmt.Errorf("server drift found but not quarantined (%v); not overwriting it", err)
 			}
-			seed = true
+			from = q
 		}
 	}
 	meta, err := rt.seat.ReadMeta(cur)
@@ -128,21 +128,19 @@ func (s *Server) syncSeatLocked(rt *runtime) error {
 	if err != nil {
 		return fmt.Errorf("point HEAD: %w", err)
 	}
-	if seed {
-		err = s.seatApply(rt, "", cur)
-	} else {
-		err = s.seatApply(rt, base, cur)
-		if err == gitshadow.ErrDiverged {
-			// Changed between the check and the apply.
-			st, cerr := s.seatState(rt)
-			if cerr == nil {
-				cerr = s.quarantineSeat(rt, st, base)
-			}
-			if cerr != nil {
-				return cerr
-			}
-			err = s.seatApply(rt, "", cur)
+	// Apply from the quarantined capture, verified, never a blind seed: an
+	// edit made after the quarantine's capture must not be overwritten.
+	err = s.seatApply(rt, from, cur)
+	for i := 0; i < 5 && err == gitshadow.ErrDiverged; i++ {
+		st, cerr := s.seatState(rt)
+		if cerr != nil {
+			return cerr
 		}
+		q, cerr := s.quarantineSeat(rt, st, base)
+		if cerr != nil {
+			return cerr
+		}
+		err = s.seatApply(rt, q, cur)
 	}
 	if err != nil {
 		return err
@@ -153,26 +151,26 @@ func (s *Server) syncSeatLocked(rt *runtime) error {
 
 // quarantineSeat keeps the server seat's diverged state under
 // refs/quarantine/server/<id> in checkpoints.git (I4, F14).
-func (s *Server) quarantineSeat(rt *runtime, st gitshadow.State, base string) error {
+func (s *Server) quarantineSeat(rt *runtime, st gitshadow.State, base string) (string, error) {
 	qcp, err := rt.seat.CommitState(st, "refs/seat/quarantine", base, 0)
 	if err != nil {
-		return err
+		return "", err
 	}
 	pack, err := rt.seat.PackSince(qcp, base)
 	if err != nil {
-		return err
+		return "", err
 	}
 	qid := ids.New()
 	if err := rt.cps.ReceivePack(pack, "refs/quarantine/server/"+qid, qcp); err != nil {
-		return err
+		return "", err
 	}
 	if err := s.store.InsertQuarantine(&store.Quarantine{ID: qid, WorkspaceID: rt.id, SourceKind: "server",
 		CheckpointID: qcp, BaseCheckpointID: base, Reason: "server_drift", CreatedAt: store.Now()}); err != nil {
-		return err
+		return "", err
 	}
 	s.event(rt.id, "server", "", "quarantine.created", map[string]string{"id": qid, "reason": "server_drift", "source": "server"})
 	log.Printf("workspace %s: server drift kept as quarantine %s", rt.id, qid)
-	return nil
+	return qcp, nil
 }
 
 // seatState captures the server worktree for drift detection. While a
