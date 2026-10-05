@@ -94,6 +94,7 @@ func Main(args []string) int {
 			return
 		}
 		defer c.CloseNow()
+		c.SetReadLimit(1 << 24)
 		c.Write(r.Context(), websocket.MessageText, []byte("hello"))
 		for {
 			typ, b, err := c.Read(r.Context())
