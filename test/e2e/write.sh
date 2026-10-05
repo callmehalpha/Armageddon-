@@ -32,6 +32,9 @@ ROOT=${E2E_ROOT:-/srv/armageddon-write-$$}
 DATA=$ROOT/server
 LAPTOP=$ROOT/laptop
 R=$LAPTOP/replica
+RUN=$ROOT/run
+SOCK=$RUN/helper.sock
+SERVER_USER=${SERVER_USER:-armageddon}
 export ARMAGEDDON_CONFIG_DIR=$LAPTOP/config ARMAGEDDON_DATA_DIR=$LAPTOP/data
 export GIT_AUTHOR_NAME=laptop GIT_AUTHOR_EMAIL=laptop@example.com GIT_COMMITTER_NAME=laptop GIT_COMMITTER_EMAIL=laptop@example.com
 ADMIN_PW=$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')
@@ -45,17 +48,29 @@ fail() {
   exit 1
 }
 step() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
-SERVER_PID= PROXY_PID= AGENT_PID= SLEEP_PID=
+SERVER_PID= HELPER_PID= PROXY_PID= AGENT_PID= SLEEP_PID=
 cleanup() {
-  for p in $AGENT_PID $PROXY_PID $SERVER_PID $SLEEP_PID; do kill -9 "$p" 2>/dev/null || true; done
+  for p in $AGENT_PID $PROXY_PID $SERVER_PID $SLEEP_PID $HELPER_PID; do kill -9 "$p" 2>/dev/null || true; done
 }
 trap cleanup EXIT
 
-[ "$(id -u)" = 0 ] || fail "run as root (workspace isolation needs it)"
-rm -rf "$ROOT"; mkdir -p "$ROOT" "$LAPTOP"; chmod 755 "$ROOT"
+[ "$(id -u)" = 0 ] || fail "run as root (the helper needs it; the server drops to $SERVER_USER)"
+id "$SERVER_USER" >/dev/null 2>&1 || useradd --system --user-group --no-create-home --shell /usr/sbin/nologin "$SERVER_USER" 2>/dev/null || id "$SERVER_USER" >/dev/null
+rm -rf "$ROOT"; mkdir -p "$ROOT" "$LAPTOP" "$DATA"; chmod 755 "$ROOT"
+chown "$SERVER_USER:" "$DATA"
 
+# Two processes, as in production (M3.1): the helper as root, the server as
+# $SERVER_USER.
+as_server() { setpriv --reuid="$SERVER_USER" --regid="$SERVER_USER" --clear-groups -- env HOME="$DATA" "$@"; }
+start_helper() {
+  "$BIN" helper --data "$DATA" --socket "$SOCK" --server-user "$SERVER_USER" >>"$ROOT/helper.log" 2>&1 &
+  HELPER_PID=$!
+  for _ in $(seq 50); do [ -S "$SOCK" ] && return; sleep 0.1; done
+  fail "helper did not start"
+}
 start_server() {
-  "$BIN" server run --data "$DATA" >>"$ROOT/server.log" 2>&1 &
+  setpriv --reuid="$SERVER_USER" --regid="$SERVER_USER" --clear-groups -- env HOME="$DATA" \
+    "$BIN" server run --data "$DATA" --helper-socket "$SOCK" >>"$ROOT/server.log" 2>&1 &
   SERVER_PID=$!
   for _ in $(seq 50); do curl -sf "$B/healthz" >/dev/null && return; sleep 0.2; done
   fail "server did not start"
@@ -124,7 +139,7 @@ in_cp_tree() { # in_cp_tree FILE: FILE is in the current checkpoint's tree
 laptop() { (cd "$R" && "$BIN" "$@"); }
 
 step "0. server, admin, workspace, laptop"
-"$BIN" server init --data "$DATA" --listen "127.0.0.1:$PORT" --public-url "$P" >/dev/null
+as_server "$BIN" server init --data "$DATA" --listen "127.0.0.1:$PORT" --public-url "$P" >/dev/null
 python3 - "$DATA/server.json" <<'EOF'
 import json, sys
 p = sys.argv[1]; c = json.load(open(p))
@@ -133,6 +148,7 @@ c["handoff_timeout_ms"] = 10000 # T_handoff (default 30 s)
 c["capture_interval_ms"] = 1000
 json.dump(c, open(p, "w"))
 EOF
+start_helper
 start_server
 proxy_up
 TOKEN=$(grep -o 'setup?token=[a-z0-9]*' "$ROOT/server.log" | head -1 | cut -d= -f2)

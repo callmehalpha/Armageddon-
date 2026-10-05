@@ -122,7 +122,29 @@ func run(dir string, env []string, stdin []byte, prepare func(*exec.Cmd), args .
 
 // Init creates a shadow repository with byte-exact capture settings (§6.3).
 func Init(gitDir string, prepare func(*exec.Cmd), extraExcludes ...string) error {
-	if _, err := run("/", gitEnv(), nil, prepare, "init", "-q", "--bare", gitDir); err != nil {
+	return InitWith(gitDir, prepare, nil, extraExcludes...)
+}
+
+// InitWith is Init for a repository the caller cannot write directly (the
+// server seat shadow belongs to the workspace user): git runs through
+// prepare, and the info/ files are written with writeFile, which must
+// create missing parent directories. A nil writeFile writes in-process.
+func InitWith(gitDir string, prepare func(*exec.Cmd), writeFile func(path string, data []byte, perm os.FileMode) error, extraExcludes ...string) error {
+	if writeFile == nil {
+		writeFile = func(p string, data []byte, perm os.FileMode) error {
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(p, data, perm)
+		}
+	}
+	// Run next to the repository rather than in "/": workspace processes
+	// must start inside the workspace directory (§2.5).
+	dir := filepath.Dir(gitDir)
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		dir = "/"
+	}
+	if _, err := run(dir, gitEnv(), nil, prepare, "init", "-q", "--bare", gitDir); err != nil {
 		return err
 	}
 	for _, kv := range [][2]string{
@@ -131,20 +153,17 @@ func Init(gitDir string, prepare func(*exec.Cmd), extraExcludes ...string) error
 		{"core.quotepath", "false"}, {"gc.auto", "0"}, {"core.untrackedcache", "true"},
 		{"index.version", "4"},
 	} {
-		if _, err := run("/", gitEnv(), nil, prepare, "--git-dir="+gitDir, "config", kv[0], kv[1]); err != nil {
+		if _, err := run(dir, gitEnv(), nil, prepare, "--git-dir="+gitDir, "config", kv[0], kv[1]); err != nil {
 			return err
 		}
 	}
 	info := filepath.Join(gitDir, "info")
-	if err := os.MkdirAll(info, 0o755); err != nil {
-		return err
-	}
 	attrs := "* -text -eol -filter -ident -working-tree-encoding -diff -merge\n"
-	if err := os.WriteFile(filepath.Join(info, "attributes"), []byte(attrs), 0o644); err != nil {
+	if err := writeFile(filepath.Join(info, "attributes"), []byte(attrs), 0o644); err != nil {
 		return err
 	}
 	ex := strings.Join(append(append([]string{}, BuiltinExcludes...), extraExcludes...), "\n") + "\n"
-	return os.WriteFile(filepath.Join(info, "exclude"), []byte(ex), 0o644)
+	return writeFile(filepath.Join(info, "exclude"), []byte(ex), 0o644)
 }
 
 // OpInProgress reports the Git operation in progress in a repository whose

@@ -21,11 +21,16 @@ Armageddon is a self-hosted development workspace server. Your code, Git history
 go build -o armageddon ./cmd/armageddon            # Go ≥ 1.24 (the toolchain auto-updates as needed); git ≥ 2.42 on the server
 sudo install -m 0755 armageddon /usr/local/bin/
 
-# Server (as root: workspace isolation uses one OS user per workspace)
-sudo armageddon server init --data /var/lib/armageddon \
+# Server: the server runs as the unprivileged `armageddon` user; the helper
+# runs as root and is the only thing that can create workspace users.
+sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin armageddon
+sudo install -d -o armageddon -g armageddon -m 0755 /var/lib/armageddon
+sudo -u armageddon armageddon server init --data /var/lib/armageddon \
      --listen :8080 --public-url http://your-server:8080
-sudo armageddon server run --data /var/lib/armageddon
+sudo armageddon helper --data /var/lib/armageddon &          # root; socket /run/armageddon/helper.sock
+sudo -u armageddon armageddon server run --data /var/lib/armageddon
 #   → prints a one-time setup URL: open it to create the first admin.
+# An MVP data directory (written by a root server) is upgraded automatically.
 ```
 
 In the browser:
@@ -49,8 +54,9 @@ For TLS, pass `--tls-cert/--tls-key` to `server init`, or put the server behind 
 
 ```sh
 go test ./...                       # unit tests
-sudo test/e2e/mvp.sh ./armageddon   # MVP acceptance test (root; uses /srv and github.com)
-node test/e2e/ui.mjs <setup-url>    # browser test (Playwright + Chromium) against a fresh server
+sudo test/e2e/mvp.sh ./armageddon   # MVP acceptance test (root; helper + unprivileged server; uses /srv and github.com)
+sudo test/e2e/ui.sh ./armageddon    # browser test (Playwright + Chromium) against a fresh split server
+sudo test/integration/escape.sh ./armageddon   # privilege-boundary escape matrix (E1–E6)
 ```
 
 The acceptance test runs the north-star scenario on one machine:
@@ -67,7 +73,7 @@ The acceptance test runs the north-star scenario on one machine:
 The full list, including what couldn't be verified in the cloud sandbox and how to run everything on your own machine, is in [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md).
 
 - **Replicas are read-only.** Local write mode (taking the lease to your laptop) is milestone M7.
-- **The server runs as root** and drops to per-workspace users in-process. The design's separate privileged helper is milestone M3.1.
+- **Two processes:** `armageddon helper` runs as root and serves only the allowlisted API of contract §2.5; `armageddon server run` runs as the unprivileged `armageddon` user. Without a helper (non-root development) everything runs as the current user, with no isolation.
 - **No installer, automatic TLS (ACME) or self-update yet** (M5).
 - **No SSH endpoint or code-server yet** (M4). The browser terminal is the server seat's UI.
 - **Polling capture:** the server seat is scanned every 2 s. That's fine up to roughly 50k files (see `docs/design/prototypes/P1-capture-perf.md`).
@@ -82,7 +88,8 @@ internal/agent/          device pairing, credential helper, replicas (clone/foll
 internal/treesync/       git-shadow checkpoints (capture, thin-pack transport, verified apply)
 internal/store/          SQLite persistence and migrations
 internal/identity/       argon2id passwords, Ed25519 device challenges
-internal/sysuser/        per-workspace OS users (MVP stand-in for the privileged helper)
+internal/helper/         privileged helper (root): typed socket API, socket and dev clients
+internal/sysuser/        compatibility alias for helper.Account (MVP name)
 test/e2e/mvp.sh          acceptance test
 docs/design/             design contract, implementation plan, prototype results
 ```

@@ -1,10 +1,12 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/callmehalpha/Armageddon-/internal/ids"
@@ -27,9 +29,9 @@ func (o *serverSeat) GitOpInProgress() string {
 func (o *serverSeat) Quiesce(reason string) {
 	n := o.s.sessions.CloseAll(o.rt.id, reason)
 	o.rt.seatMu.Lock()
-	killed := o.rt.acct.KillAll(3 * time.Second)
+	stopped := o.s.stopWorkspaceProcesses(o.rt.id, 3*time.Second)
 	o.rt.seatMu.Unlock()
-	o.s.event(o.rt.id, "server", "", "seat.quiesced", map[string]any{"sessions_closed": n, "processes_stopped": killed, "reason": reason})
+	o.s.event(o.rt.id, "server", "", "seat.quiesced", map[string]any{"sessions_closed": n, "processes_stopped": stopped, "reason": reason})
 }
 
 func (o *serverSeat) Flush() error {
@@ -209,4 +211,24 @@ func (s *Server) seatApply(rt *runtime, from, to string) error {
 		return fmt.Errorf("seat apply: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// stopWorkspaceProcesses implements decision Q1 through the helper's
+// SignalWorkspace(all): SIGTERM, a grace period, then SIGKILL. The server
+// itself has no kill capability over workspace processes (§2.5). Docker
+// services are not the workspace user's processes and keep running. It
+// reports whether the signals were delivered.
+func (s *Server) stopWorkspaceProcesses(wsID string, grace time.Duration) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), grace+10*time.Second)
+	defer cancel()
+	if err := s.helper.SignalWorkspace(ctx, wsID, "all", syscall.SIGTERM); err != nil {
+		log.Printf("workspace %s: stop processes: %v", wsID, err)
+		return false
+	}
+	time.Sleep(grace)
+	if err := s.helper.SignalWorkspace(ctx, wsID, "all", syscall.SIGKILL); err != nil {
+		log.Printf("workspace %s: stop processes: %v", wsID, err)
+		return false
+	}
+	return true
 }

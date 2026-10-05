@@ -27,6 +27,10 @@ type Server struct {
 	// HandoffTimeoutMS is T_handoff: how long a holder has to flush and
 	// release before the handoff fails (contract §3.2; default 30 s).
 	HandoffTimeoutMS int `json:"handoff_timeout_ms,omitempty"`
+	// RunDir holds the per-workspace authority sockets (P-14). Default:
+	// the directory of the helper socket (/run/armageddon), or a private
+	// temp directory without a helper.
+	RunDir string `json:"run_dir,omitempty"`
 }
 
 // TStale and THandoff return the lease timers with their defaults applied.

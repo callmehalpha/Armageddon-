@@ -189,7 +189,10 @@ func (s *sut) logf(f string, a ...any) {
 
 func (s *sut) startServer() {
 	logf, _ := os.OpenFile(filepath.Join(s.root, "server.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	cmd := exec.Command(s.bin, "server", "run", "--data", s.dataDir)
+	// The suite tests the protocol, not isolation: run the server in
+	// development mode (as root, the server refuses to start without a
+	// helper otherwise).
+	cmd := exec.Command(s.bin, "server", "run", "--data", s.dataDir, "--dev")
 	cmd.Stdout, cmd.Stderr = logf, logf
 	if err := cmd.Start(); err != nil {
 		s.t.Fatal(err)
