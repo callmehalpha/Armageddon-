@@ -147,6 +147,46 @@ func Init(gitDir string, prepare func(*exec.Cmd), extraExcludes ...string) error
 	return os.WriteFile(filepath.Join(info, "exclude"), []byte(ex), 0o644)
 }
 
+// OpInProgress reports the Git operation in progress in a repository whose
+// git directory is gitDir ("merge", "rebase", ...), or "" (contract §5.6).
+// A graceful lease handoff is refused while one is in progress.
+func OpInProgress(gitDir string) string {
+	for _, c := range []struct{ path, op string }{
+		{"rebase-merge", "rebase"}, {"rebase-apply", "rebase"}, {"MERGE_HEAD", "merge"},
+		{"CHERRY_PICK_HEAD", "cherry-pick"}, {"REVERT_HEAD", "revert"}, {"BISECT_LOG", "bisect"},
+		{"sequencer", "cherry-pick/revert sequence"},
+	} {
+		if _, err := os.Lstat(filepath.Join(gitDir, c.path)); err == nil {
+			return c.op
+		}
+	}
+	return ""
+}
+
+// GitDirOf resolves the git directory of a working tree: ".git" itself, or
+// the directory a ".git" file points to (linked worktrees, submodules).
+func GitDirOf(workTree string) string {
+	p := filepath.Join(workTree, ".git")
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return p // a directory, or missing
+	}
+	if d, ok := strings.CutPrefix(strings.TrimSpace(string(b)), "gitdir: "); ok {
+		if !filepath.IsAbs(d) {
+			d = filepath.Join(workTree, d)
+		}
+		return d
+	}
+	return p
+}
+
+// IndexLocked reports whether another git process holds the index lock;
+// capture and ref pushes skip and retry (§5.6).
+func IndexLocked(gitDir string) bool {
+	_, err := os.Lstat(filepath.Join(gitDir, "index.lock"))
+	return err == nil
+}
+
 // CaptureStats breaks capture time into phases for P1.
 type CaptureStats struct {
 	PreservedAdded int

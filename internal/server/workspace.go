@@ -12,7 +12,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/callmehalpha/Armageddon-/internal/ids"
 	"github.com/callmehalpha/Armageddon-/internal/store"
@@ -60,13 +59,33 @@ type runtime struct {
 
 	// fence: receive-pack holds it as a reader, lease transitions as a writer (§4.2).
 	fence sync.RWMutex
-	// commitMu serialises authority commands for this workspace (§4.1).
+	// commitMu serialises checkpoint commits for this workspace (§4.1).
 	commitMu sync.Mutex
+	// leaseMu serialises lease commands (acquire, release, force, timers).
+	leaseMu sync.Mutex
+	// seatMu serialises everything that touches tree/ and the seat shadow:
+	// capture, apply as a follower, stopping dev processes.
+	seatMu sync.Mutex
+	// ops is the server seat's side of a handoff (tests replace it).
+	ops seatOps
+
+	leaseStateMu    sync.Mutex
+	handoffFailures map[int64]*LeaseError // why the handoff at an epoch ended without a transfer
+	last            transition            // the latest change of holder, for long-poll events
 
 	notifyMu sync.Mutex
-	notify   chan struct{} // closed and replaced on every committed checkpoint
+	notify   chan struct{} // closed and replaced on every committed checkpoint and lease change
 
+	ctx    context.Context
 	cancel context.CancelFunc
+}
+
+// done is closed when the runtime stops.
+func (rt *runtime) done() <-chan struct{} {
+	if rt.ctx == nil {
+		return nil
+	}
+	return rt.ctx.Done()
 }
 
 func (rt *runtime) changed() <-chan struct{} {
@@ -104,6 +123,7 @@ func (s *Server) newRuntime(w *store.Workspace) (*runtime, error) {
 	rt.seat = &gitshadow.Shadow{GitDir: p.SeatShadow, WorkTree: p.Tree, IndexFile: p.SeatIndex,
 		Preserve: []string{".env*"}, Prepare: func(c *exec.Cmd) { acct.Prepare(c) }}
 	rt.cps = &gitshadow.Shadow{GitDir: p.Checkpoints, WorkTree: p.Root, IndexFile: filepath.Join(p.Root, "cps.index")}
+	rt.ops = &serverSeat{s: s, rt: rt}
 	return rt, nil
 }
 
@@ -131,6 +151,7 @@ func (s *Server) startWorkspaces(ctx context.Context) error {
 		s.rts[w.ID] = rt
 		s.mu.Unlock()
 		s.startCaptureLoop(ctx, rt)
+		s.resumeHandoff(rt)
 	}
 	return nil
 }
@@ -332,139 +353,4 @@ func (s *Server) writeHooks(rt *runtime) error {
 		}
 	}
 	return nil
-}
-
-// ---- server seat capture & authority commit ----
-
-func (s *Server) startCaptureLoop(ctx context.Context, rt *runtime) {
-	cctx, cancel := context.WithCancel(ctx)
-	rt.cancel = cancel
-	interval := time.Duration(s.cfg.CaptureIntervalMS) * time.Millisecond
-	go func() {
-		t := time.NewTicker(interval)
-		defer t.Stop()
-		failures := 0
-		for {
-			select {
-			case <-cctx.Done():
-				return
-			case <-t.C:
-			}
-			if _, err := s.captureOnce(rt); err != nil {
-				failures++
-				if failures == 1 || failures%30 == 0 {
-					log.Printf("workspace %s: capture: %v", rt.id, err)
-				}
-			} else {
-				failures = 0
-			}
-		}
-	}()
-}
-
-// captureOnce captures the server seat and commits a checkpoint if the
-// working state changed. Returns the new sequence number (0 if unchanged).
-func (s *Server) captureOnce(rt *runtime) (int64, error) {
-	w, err := s.store.WorkspaceByID(rt.id)
-	if err != nil {
-		return 0, err
-	}
-	if w.State != StateReady {
-		return 0, nil
-	}
-	lease, err := s.store.LeaseOf(nil, rt.id)
-	if err != nil {
-		return 0, err
-	}
-	if lease.HolderKind != "server" {
-		return 0, nil // the server seat is a follower while a device holds the lease
-	}
-	st, err := rt.seat.CaptureState()
-	if err != nil {
-		return 0, err
-	}
-	if w.CurrentCheckpoint != "" {
-		prev, err := rt.cps.StateOf(w.CurrentCheckpoint)
-		if err == nil && prev.Same(st) {
-			return 0, nil
-		}
-	}
-	cp, err := rt.seat.CommitState(st, "refs/seat/latest", w.CurrentCheckpoint, int(w.CheckpointSeq+1))
-	if err != nil {
-		return 0, err
-	}
-	// Seat shadow (workspace user) → checkpoints.git (server) as a thin pack
-	// against current, never by sharing object directories (§2.5, P-1).
-	pack, err := rt.seat.PackSince(cp, w.CurrentCheckpoint)
-	if err != nil {
-		return 0, err
-	}
-	if err := rt.cps.ReceivePack(pack, "refs/staging/server", cp); err != nil {
-		return 0, err
-	}
-	return s.commitCheckpoint(rt, lease.Epoch, "server", "", w.CurrentCheckpoint, cp, "auto")
-}
-
-var (
-	ErrLeaseLost      = errors.New("lease_lost")
-	ErrParentMismatch = errors.New("parent_mismatch")
-)
-
-// commitCheckpoint is the authority's commit command (§6.4): epoch check,
-// parent CAS, sequence assignment, then ref update and notification.
-func (s *Server) commitCheckpoint(rt *runtime, epoch int64, authorKind, authorDevice, parent, cp, kind string) (int64, error) {
-	rt.commitMu.Lock()
-	defer rt.commitMu.Unlock()
-	meta, err := rt.cps.ReadMeta(cp)
-	if err != nil {
-		return 0, fmt.Errorf("checkpoint %s unreadable: %w", cp, err)
-	}
-	tree, err := rt.cps.Git(nil, "rev-parse", cp+":worktree")
-	if err != nil {
-		return 0, err
-	}
-	var seq int64
-	err = s.store.Tx(context.Background(), func(tx *sql.Tx) error {
-		if existing, err := s.store.CheckpointByIDTx(tx, rt.id, cp); err == nil {
-			seq = existing.Seq // idempotent retry
-			return nil
-		}
-		lease, err := s.store.LeaseOf(tx, rt.id)
-		if err != nil {
-			return err
-		}
-		if lease.Epoch != epoch || lease.HolderKind != authorKind || lease.HolderDevice != authorDevice {
-			return ErrLeaseLost
-		}
-		var cur sql.NullString
-		var curSeq int64
-		if err := tx.QueryRow(`SELECT current_checkpoint_id, checkpoint_seq FROM workspaces WHERE id = ?`, rt.id).Scan(&cur, &curSeq); err != nil {
-			return err
-		}
-		if cur.String != parent {
-			return ErrParentMismatch
-		}
-		seq = curSeq + 1
-		now := store.Now()
-		if err := s.store.InsertCheckpoint(tx, &store.Checkpoint{ID: cp, WorkspaceID: rt.id, Seq: seq, Epoch: epoch, ParentID: parent,
-			AuthorKind: authorKind, AuthorDevice: authorDevice, HeadRef: meta.HeadRef, HeadOid: meta.HeadOid,
-			WorktreeTree: strings.TrimSpace(string(tree)), Kind: kind, CreatedAt: now}); err != nil {
-			return err
-		}
-		ok, err := s.store.AdvanceCurrent(tx, rt.id, parent, cp, seq, now)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return ErrParentMismatch
-		}
-		return nil
-	})
-	if err != nil {
-		return 0, err
-	}
-	rt.cps.Git(nil, "update-ref", fmt.Sprintf("refs/checkpoints/%d", seq), cp)
-	rt.cps.Git(nil, "update-ref", "refs/checkpoints/current", cp)
-	rt.broadcast()
-	return seq, nil
 }

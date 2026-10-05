@@ -167,30 +167,6 @@ func (s *Store) AddMember(wsID, userID, role, by string, now int64) error {
 	return err
 }
 
-// ---- lease ----
-
-type Lease struct {
-	WorkspaceID, HolderKind, HolderDevice, State string
-	Epoch, AcquiredAt, HeartbeatAt               int64
-}
-
-func (s *Store) LeaseOf(tx *sql.Tx, wsID string) (*Lease, error) {
-	var l Lease
-	var dev sql.NullString
-	q := `SELECT workspace_id, holder_kind, holder_device_id, state, epoch, acquired_at, heartbeat_at FROM leases WHERE workspace_id = ?`
-	var row *sql.Row
-	if tx != nil {
-		row = tx.QueryRow(q, wsID)
-	} else {
-		row = s.db.QueryRow(q, wsID)
-	}
-	if err := row.Scan(&l.WorkspaceID, &l.HolderKind, &dev, &l.State, &l.Epoch, &l.AcquiredAt, &l.HeartbeatAt); err != nil {
-		return nil, notFound(err)
-	}
-	l.HolderDevice = dev.String
-	return &l, nil
-}
-
 // ---- checkpoints ----
 
 type Checkpoint struct {
@@ -345,4 +321,41 @@ func (s *Store) Events(wsID string, limit int) ([]*Event, error) {
 		out = append(out, &e)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) QuarantineByID(wsID, id string) (*Quarantine, error) {
+	var q Quarantine
+	err := s.db.QueryRow(`SELECT id, workspace_id, source_kind, COALESCE(source_device_id, ''), checkpoint_id, COALESCE(base_checkpoint_id, ''), reason, created_at
+		FROM quarantines WHERE workspace_id = ? AND id = ? AND resolved_at IS NULL`, wsID, id).
+		Scan(&q.ID, &q.WorkspaceID, &q.SourceKind, &q.SourceDevice, &q.CheckpointID, &q.BaseCheckpointID, &q.Reason, &q.CreatedAt)
+	if err != nil {
+		return nil, notFound(err)
+	}
+	return &q, nil
+}
+
+// QuarantineByCheckpoint finds a device's uncleared quarantine of a
+// checkpoint (quarantine uploads are retried and must be idempotent).
+func (s *Store) QuarantineByCheckpoint(wsID, device, cp string) (*Quarantine, error) {
+	var id string
+	if err := s.db.QueryRow(`SELECT id FROM quarantines WHERE workspace_id = ? AND source_device_id = ? AND checkpoint_id = ? AND resolved_at IS NULL`,
+		wsID, device, cp).Scan(&id); err != nil {
+		return nil, notFound(err)
+	}
+	return s.QuarantineByID(wsID, id)
+}
+
+// ResolveQuarantine marks a quarantine cleared (decision Q6: quarantines
+// are kept until explicitly cleared; nothing resolves them automatically).
+func (s *Store) ResolveQuarantine(wsID, id, resolution string, now int64) (bool, error) {
+	return one(s.db.Exec(`UPDATE quarantines SET resolved_at = ?, resolution = ? WHERE workspace_id = ? AND id = ? AND resolved_at IS NULL`,
+		now, resolution, wsID, id))
+}
+
+// OpenQuarantinesOfDevice counts a device's uncleared quarantines in a
+// workspace (the per-device quota, §6.7).
+func (s *Store) OpenQuarantinesOfDevice(wsID, device string) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM quarantines WHERE workspace_id = ? AND source_device_id = ? AND resolved_at IS NULL`, wsID, device).Scan(&n)
+	return n, err
 }

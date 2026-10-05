@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 type Account struct {
@@ -124,6 +125,56 @@ func (a *Account) Chown(paths ...string) error {
 		}
 	}
 	return nil
+}
+
+// KillAll stops every process running as the workspace user: SIGTERM, then
+// SIGKILL for whatever is left after grace. It implements decision Q1
+// ("development processes stop when a device takes the workspace"). Docker
+// services are not the workspace user's processes and keep running.
+//
+// In development mode (not root) the account is the server's own user, so
+// nothing is signalled and 0 is returned.
+//
+// MOVES TO THE HELPER: with the privilege split (Phase 2) this becomes the
+// root helper's SignalWorkspace operation; the server must not keep a
+// kill capability of its own.
+func (a *Account) KillAll(grace time.Duration) int {
+	if !a.isolated || a.UID == 0 {
+		return 0
+	}
+	pids := a.processes()
+	for _, p := range pids {
+		syscall.Kill(p, syscall.SIGTERM)
+	}
+	deadline := time.Now().Add(grace)
+	for time.Now().Before(deadline) && len(a.processes()) > 0 {
+		time.Sleep(50 * time.Millisecond)
+	}
+	for _, p := range a.processes() {
+		syscall.Kill(p, syscall.SIGKILL)
+	}
+	return len(pids)
+}
+
+// processes lists the PIDs whose effective owner is the account (Linux
+// /proc; the server is Linux-only).
+func (a *Account) processes() []int {
+	ents, _ := os.ReadDir("/proc")
+	var out []int
+	for _, e := range ents {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid == os.Getpid() {
+			continue
+		}
+		fi, err := os.Stat(filepath.Join("/proc", e.Name()))
+		if err != nil {
+			continue
+		}
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Uid == a.UID {
+			out = append(out, pid)
+		}
+	}
+	return out
 }
 
 // MkdirOwned creates a directory owned by the account with the given mode.
