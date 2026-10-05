@@ -175,6 +175,40 @@ func (c *Client) Do(method, path string, body io.Reader, out any) error {
 	return decode(resp, out)
 }
 
+// call sends a JSON request and decodes the JSON reply into out whatever
+// the status, because lease rejections (409) carry the lease state the
+// agent acts on (P-7, P-8). status is 0 when the server was not reached.
+func (c *Client) call(method, path string, in, out any) (int, error) {
+	var body io.Reader
+	if in != nil {
+		b, _ := json.Marshal(in)
+		body = bytes.NewReader(b)
+	}
+	resp, err := c.Raw(method, path, body)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, err
+	}
+	if out != nil {
+		json.Unmarshal(b, out)
+	}
+	if resp.StatusCode >= 300 {
+		var e struct {
+			Error string `json:"error"`
+		}
+		json.Unmarshal(b, &e)
+		if e.Error == "" {
+			e.Error = strings.TrimSpace(string(b))
+		}
+		return resp.StatusCode, fmt.Errorf("%s: %s", resp.Status, e.Error)
+	}
+	return resp.StatusCode, nil
+}
+
 // Raw performs an authenticated request and returns the response; the
 // caller closes the body.
 func (c *Client) Raw(method, path string, body io.Reader) (*http.Response, error) {

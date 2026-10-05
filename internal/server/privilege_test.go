@@ -54,7 +54,13 @@ func TestNoPrivilegeOutsideHelper(t *testing.T) {
 				t.Errorf("%s:%d: %s: %q", f, line(src, loc[0]), fb.why, src[loc[0]:loc[1]])
 			}
 		}
+		// hooks.go is the entry point of processes that already run as the
+		// workspace user (Git hooks, `hook seat-apply`), so its git-shadow
+		// needs no Prepare.
 		for _, loc := range shadowLit.FindAllStringIndex(src, -1) {
+			if f == "hooks.go" {
+				continue
+			}
 			lit := balanced(src[loc[0]:])
 			if !strings.Contains(lit, "Prepare:") && !strings.Contains(lit, "p.Checkpoints") {
 				t.Errorf("%s:%d: git-shadow without Prepare runs git as the server user; only checkpoints.git may: %s", f, line(src, loc[0]), lit)

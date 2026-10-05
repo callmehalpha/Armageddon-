@@ -38,6 +38,8 @@ type Server struct {
 
 	sessions sessionRegistry // interactive server-seat sessions (§4.3)
 
+	clock func() int64 // unix ms; tests replace it (lease timers)
+
 	ctx context.Context
 }
 
@@ -179,13 +181,16 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func (s *Server) janitor(ctx context.Context) {
-	t := time.NewTicker(time.Minute)
+	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
-	for {
+	for i := 0; ; i++ {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+		}
+		s.sweepStale()
+		if i%12 == 0 {
 			s.store.Prune(store.Now())
 		}
 	}

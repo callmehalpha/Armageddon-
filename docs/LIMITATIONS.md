@@ -178,7 +178,7 @@ These live on the phase branches until they merge. Run each as root on a VM:
   - Other e2e scripts must use the two-process setup, because `server run` as root refuses to start without a helper unless given `--dev`.
 - **Phase 3 (local write mode, #10):**
   - `work remote --restart` only records `runtime.restart_requested`: there are no runtimes to restart until Phase 4.
-  - Stopping the server's dev processes on handoff (Q1) kills every process of the workspace user, from the server process. It moves into the helper's `SignalWorkspace` with Phase 2. In development mode (server not root) nothing is stopped.
+  - Stopping the server's dev processes on handoff (Q1) goes through the helper's `SignalWorkspace(all)`: SIGTERM, 3 s grace, SIGKILL. In development mode (`--dev`) only helper-spawned processes are signalled.
   - Local commits on a read-only replica are kept as local refs (`refs/armageddon/quarantine/...` in the replica), not uploaded to `checkpoints.git` as §5.5 describes. Working-tree changes are uploaded.
   - macOS: fsnotify uses kqueue (one descriptor per watched directory), not FSEvents; the 30 s full capture is the backstop. Not run on macOS in this phase.
   - The conformance suite (`test/conformance`) runs a small budget on every PR and a large one nightly; see the PR for the budgets run so far.
