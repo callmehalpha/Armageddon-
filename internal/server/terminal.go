@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sync"
 	"syscall"
 
 	"github.com/coder/websocket"
@@ -80,6 +81,17 @@ func (s *Server) handleTerminal(rw http.ResponseWriter, r *http.Request, w *stor
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	closeReason := "shell exited"
+	var reasonMu sync.Mutex
+	unregister := s.sessions.Register(w.ID, SessionTerminal, userOf(r).ID, func(reason string) {
+		// Banner first, then hang up (contract §4.3).
+		c.Write(ctx, websocket.MessageBinary, []byte("\r\n\x1b[33m[armageddon] "+reason+"\x1b[0m\r\n"))
+		reasonMu.Lock()
+		closeReason = reason
+		reasonMu.Unlock()
+		cancel()
+	})
+	defer unregister()
 	go func() { // shell → browser
 		buf := make([]byte, 32*1024)
 		for {
@@ -123,5 +135,7 @@ func (s *Server) handleTerminal(rw http.ResponseWriter, r *http.Request, w *stor
 	<-ctx.Done()
 	cmd.Process.Signal(syscall.SIGHUP)
 	cmd.Wait()
-	c.Close(websocket.StatusNormalClosure, "shell exited")
+	reasonMu.Lock()
+	defer reasonMu.Unlock()
+	c.Close(websocket.StatusNormalClosure, closeReason)
 }
