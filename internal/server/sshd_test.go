@@ -168,7 +168,7 @@ func TestSSHExecPTYAndLease(t *testing.T) {
 	}
 	in.Close()
 	s.Wait()
-	if !strings.Contains(buf.String(), "/dev/pts/") || !strings.Contains(buf.String(), "40 100") {
+	if (!strings.Contains(buf.String(), "/dev/pts/") && !strings.Contains(buf.String(), "/dev/ttys")) || !strings.Contains(buf.String(), "40 100") {
 		t.Fatalf("pty output: %q", buf.String())
 	}
 
