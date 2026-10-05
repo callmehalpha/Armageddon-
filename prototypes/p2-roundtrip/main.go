@@ -36,6 +36,9 @@ var (
 	seed    = flag.Int64("seed", 1, "base random seed")
 	workdir = flag.String("workdir", "", "scratch directory")
 	keep    = flag.Bool("keep", false, "keep failing sequence directories")
+	mode    = flag.String("mode", "fuzz", "fuzz | export | import | xplat-local (see xplat.go)")
+	xdir    = flag.String("dir", "", "export/import directory (cross-platform modes)")
+	strict  = flag.Bool("strict", false, "cross-platform modes: exit 1 on a silent mismatch")
 )
 
 type stats struct {
@@ -48,6 +51,9 @@ type stats struct {
 
 func main() {
 	flag.Parse()
+	if *mode != "fuzz" {
+		os.Exit(runXplat(*mode, *xdir, *strict))
+	}
 	if *workdir == "" {
 		d, _ := os.MkdirTemp("", "p2-")
 		*workdir = d

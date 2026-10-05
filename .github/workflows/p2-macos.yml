@@ -1,0 +1,145 @@
+# P2 (capture → apply round-trip) on macOS, case-insensitive APFS.
+#
+# Phase 1 validation of contract §11 P2: "documented, tested behaviour on
+# macOS case-insensitive APFS for case-only renames and NFD names (expected:
+# detect and report collisions, never corrupt)".
+#
+# These jobs REPORT results (job summary + logs); macOS behaviour was unknown
+# when this was written, so the fuzz job does not gate the PR. The
+# cross-platform import jobs fail only on a SILENT mismatch (a tree that
+# differs from the exporter's with nothing flagging it).
+name: p2-macos
+
+on:
+  pull_request:
+    paths:
+      - "prototypes/**"
+      - "internal/treesync/**"
+      - ".github/workflows/p2-macos.yml"
+  workflow_dispatch:
+    inputs:
+      budget:
+        description: "Fuzz sequences in total (split over 8 shards)"
+        default: "10000"
+        required: true
+      rounds:
+        description: "Rounds per sequence"
+        default: "15"
+        required: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: prototypes
+
+jobs:
+  fuzz-macos:
+    name: fuzz on macOS (shard ${{ matrix.shard }})
+    runs-on: macos-latest
+    timeout-minutes: 340
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        # PRs run one small shard; workflow_dispatch runs 8.
+        shard: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '[0,1,2,3,4,5,6,7]' || '[0]') }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: prototypes/go.mod
+          cache-dependency-path: prototypes/go.sum
+      - name: filesystem facts
+        run: |
+          sw_vers || true
+          git --version
+          diskutil info / | grep -Ei 'personality|case' || true
+          d=$(mktemp -d); touch "$d/Case"; ls "$d/case" && echo "case-insensitive: yes" || echo "case-insensitive: no"
+      - name: fuzz
+        env:
+          EVENT: ${{ github.event_name }}
+          BUDGET: ${{ github.event.inputs.budget }}
+          ROUNDS: ${{ github.event.inputs.rounds }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          if [ "$EVENT" = workflow_dispatch ]; then
+            seqs=$(( (BUDGET + 7) / 8 )); rounds=$ROUNDS
+          else
+            seqs=30; rounds=10
+          fi
+          seed=$(( SHARD * 1000000 + 1 ))
+          go build -o "$RUNNER_TEMP/p2" ./p2-roundtrip
+          set +e
+          "$RUNNER_TEMP/p2" -seqs "$seqs" -rounds "$rounds" -seed "$seed" -workdir "$RUNNER_TEMP/p2w" -keep 2>&1 | tee "$RUNNER_TEMP/p2.log"
+          rc=${PIPESTATUS[0]}
+          {
+            echo "### P2 fuzz on macOS, shard $SHARD (seqs=$seqs rounds=$rounds seed=$seed): exit $rc"
+            echo '```'
+            grep -v '^\.\.\.' "$RUNNER_TEMP/p2.log" | tail -n 60
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: upload failing sequences (kept by -keep)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2-macos-failures-shard-${{ matrix.shard }}
+          path: |
+            ${{ runner.temp }}/p2w
+            ${{ runner.temp }}/p2.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  xplat-local-macos:
+    name: focus cases, export+import on macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: prototypes/go.mod
+          cache-dependency-path: prototypes/go.sum
+      - run: go run ./p2-roundtrip -mode xplat-local -dir "$RUNNER_TEMP/x" -strict
+
+  export:
+    name: export on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: prototypes/go.mod
+          cache-dependency-path: prototypes/go.sum
+      - run: go run ./p2-roundtrip -mode export -dir "$RUNNER_TEMP/x"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p2-export-${{ matrix.os }}
+          path: ${{ runner.temp }}/x/out
+          if-no-files-found: error
+
+  import:
+    name: import on ${{ matrix.to }} (exported on ${{ matrix.from }})
+    needs: export
+    runs-on: ${{ matrix.to }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { from: ubuntu-latest, to: macos-latest }
+          - { from: macos-latest, to: ubuntu-latest }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: prototypes/go.mod
+          cache-dependency-path: prototypes/go.sum
+      - uses: actions/download-artifact@v4
+        with:
+          name: p2-export-${{ matrix.from }}
+          path: ${{ runner.temp }}/x/out
+      - run: go run ./p2-roundtrip -mode import -dir "$RUNNER_TEMP/x" -strict
