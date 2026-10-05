@@ -133,7 +133,7 @@ func (h *harness) workspace(owner *testUser, name string) *store.Workspace {
 	}
 	for i := 0; i < 200; i++ {
 		cur, err := h.s.store.WorkspaceByID(w.ID)
-		if err == nil && cur.State == StateReady && h.s.runtimeFor(w.ID) != nil {
+		if err == nil && cur.State == StateReady && h.s.runtimeFor(w.ID) != nil && cur.CheckpointSeq > 0 {
 			return cur
 		}
 		if err == nil && cur.State == StateFailed {
