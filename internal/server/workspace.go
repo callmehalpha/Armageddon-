@@ -18,6 +18,7 @@ import (
 	"github.com/callmehalpha/Armageddon-/internal/store"
 	"github.com/callmehalpha/Armageddon-/internal/sysuser"
 	"github.com/callmehalpha/Armageddon-/internal/treesync/gitshadow"
+	"github.com/callmehalpha/Armageddon-/internal/wslock"
 )
 
 // Workspace lifecycle states (contract §3.1).
@@ -209,22 +210,10 @@ func (s *Server) importWorkspace(w *store.Workspace, owner *store.User) error {
 			return err
 		}
 	}
-	for _, d := range []string{p.Home, p.SeatDir} {
-		if err := a.MkdirOwned(d, 0o700); err != nil {
-			return err
-		}
-	}
 	// Workspace user's Git identity and a guard against inherited config.
-	gitcfg := fmt.Sprintf("[user]\n\tname = %s\n\temail = %s@armageddon.local\n[init]\n\tdefaultBranch = main\n", owner.Username, owner.Username)
-	if err := os.WriteFile(filepath.Join(p.Home, ".gitconfig"), []byte(gitcfg), 0o600); err != nil {
+	if err := s.prepareHome(rt, owner, w.Slug); err != nil {
 		return err
 	}
-	// Login shells read .bash_profile; keep the prompt short and relative
-	// to the workspace rather than the server's directory layout.
-	bashrc := fmt.Sprintf("export PS1='\\[\\e[1;36m\\]%s\\[\\e[0m\\]:\\W\\$ '\n", w.Slug)
-	os.WriteFile(filepath.Join(p.Home, ".bashrc"), []byte(bashrc), 0o600)
-	os.WriteFile(filepath.Join(p.Home, ".bash_profile"), []byte("[ -f ~/.bashrc ] && . ~/.bashrc\n"), 0o600)
-	a.Chown(filepath.Join(p.Home, ".gitconfig"), filepath.Join(p.Home, ".bashrc"), filepath.Join(p.Home, ".bash_profile"))
 
 	run := func(dir string, args ...string) error {
 		cmd := a.Command(dir, "git", args...)
@@ -415,6 +404,12 @@ var (
 func (s *Server) commitCheckpoint(rt *runtime, epoch int64, authorKind, authorDevice, parent, cp, kind string) (int64, error) {
 	rt.commitMu.Lock()
 	defer rt.commitMu.Unlock()
+	// The same lock across processes, so `server backup` can pause commits.
+	unlock, err := wslock.Lock(rt.p.Root)
+	if err != nil {
+		return 0, fmt.Errorf("commit lock: %w", err)
+	}
+	defer unlock()
 	meta, err := rt.cps.ReadMeta(cp)
 	if err != nil {
 		return 0, fmt.Errorf("checkpoint %s unreadable: %w", cp, err)

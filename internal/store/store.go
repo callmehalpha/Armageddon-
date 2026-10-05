@@ -119,6 +119,19 @@ func (s *Store) migrate() error {
 	return nil
 }
 
+// SchemaVersion is the newest schema (migration number) this binary knows.
+// Release manifests record it as schema_version.
+func SchemaVersion() int {
+	entries, _ := fs.ReadDir(migrations, "migrations")
+	max := 0
+	for _, e := range entries {
+		if v, err := strconv.Atoi(strings.SplitN(e.Name(), "_", 2)[0]); err == nil && v > max {
+			max = v
+		}
+	}
+	return max
+}
+
 // Tx runs fn in one IMMEDIATE transaction (the authority's unit of work).
 func (s *Store) Tx(ctx context.Context, fn func(*sql.Tx) error) error {
 	tx, err := s.db.BeginTx(ctx, nil)
