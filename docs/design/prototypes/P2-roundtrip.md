@@ -100,3 +100,28 @@ Separately, P2 surfaced two **design changes** in the index format (§6.2):
 `Collisions()` detects paths that collide under full Unicode case folding plus NFC normalisation, including directory-prefix collisions. Its self-test cases: `README.md`/`readme.md`, `café` NFC/NFD, `straße`/`STRASSE`, `A/x`/`a/y`. The fuzz trees produced 2,623 real collisions, and all were detected.
 
 What happens when such a checkpoint is applied *on* APFS is untested. The v0.1 policy proposed in the README is to refuse to apply a checkpoint containing collisions on a case-insensitive replica, with a clear error, rather than letting the filesystem merge two files. This needs a macOS run before implementation.
+
+## macOS (Phase 1)
+
+**Method.** No macOS host is available locally, so macOS runs in CI ([`.github/workflows/p2-macos.yml`](../../../.github/workflows/p2-macos.yml), `macos-latest`, case-insensitive APFS):
+
+- **Fuzz on macOS.** The same harness as above:
+  - 30 sequences × 10 rounds on PRs that touch `prototypes/**` or `internal/treesync/**`;
+  - a configurable budget on `workflow_dispatch` (default 10,000 sequences over 8 shards).
+
+  These jobs **report** their output to the job summary and do not gate the PR, because macOS behaviour was unknown when they were written.
+- **Focus cases across platforms.** A new `-mode export|import|xplat-local` in the harness ([`xplat.go`](../../../prototypes/p2-roundtrip/xplat.go)) runs a fixed scenario:
+  - case-only rename of a file and of a directory;
+  - exec-bit flip;
+  - NFC and NFD forms of `café.txt` side by side;
+  - `Makefile` and `makefile` side by side;
+  - a retargeted, a dangling and a case-variant symlink;
+  - then the collisions removed.
+
+  The exporter records each step's checkpoint, an oracle snapshot of its own tree, and the collisions `Collisions()` flags. User repo and shadow travel as bundles. The importer seeds and applies each step and classifies it as `match`, `refused`, `mismatch-detected` (the tree differs but a collision was flagged) or **`mismatch-SILENT`** (the tree differs and nothing flagged it: the failure the contract forbids).
+
+  Jobs: export on Ubuntu → import on macOS, export on macOS → import on Ubuntu, and export+import on macOS. Import jobs fail only on a silent mismatch.
+
+**Linux baseline (local):** all 7 steps `match`, 0 silent mismatches, both as `xplat-local` and as separate export and import runs.
+
+**macOS results:** come from the CI run on the Phase 1 PR, and are recorded below once available.
