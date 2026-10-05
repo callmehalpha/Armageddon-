@@ -110,10 +110,10 @@ The commands for P6 (privilege boundary) and P8 (SSH endpoint) are *pending* the
 | # | Limitation | Workaround now | Planned fix |
 |---|------------|----------------|-------------|
 | B1 | **The server runs as root** and drops to workspace users in-process | Run on a dedicated VM | Phase 2: `armageddon helper` as root with only the allowlisted API; the server runs as `armageddon` |
-| B2 | **Replicas are read-only**; no local write mode | Work in the browser terminal on the server; local edits are quarantined, not lost | Phase 3: `armageddon work local` / `work remote` |
+| B2 | **Local write mode needs a running agent** (`armageddon agent run` or `follow`); `work local` refuses otherwise. Takeover is always explicit (Q2) | `armageddon agent install` writes a systemd --user unit or launchd plist; enable it once | Phase 3 (done in its PR) |
 | B3 | **No installer, ACME, update, backup or restore** | `server init/run` with `--tls-cert/--tls-key` or a reverse proxy; back up `/var/lib/armageddon` while the server is stopped | Phase 4 |
 | B4 | **No code-server or SSH endpoint** | Browser terminal | Phase 5. SSH stays off by default until P8 passes |
-| B5 | **Capture is polled every 2 s** | Fine up to about 50k files | Watcher-based capture ⟨P-12⟩ after P3 passes |
+| B5 | **Server-seat capture is polled every 2 s** (devices use a watcher with a 30 s full-capture backstop since Phase 3) | Fine up to about 50k files | Watcher-based capture ⟨P-12⟩ after P3 passes |
 | B6 | **Large repositories (200k+ files):** capture is marginal (896 ms p95 against a 1 s target) | Exclude generated directories; keep workspaces under about 50k tracked files | Scoped capture ⟨P-12⟩; other options in P1 F2 |
 | B7 | **Not supported:** Windows, Git submodules, Git LFS content, concurrent writers, repositories over about 5 GB | LFS pointers sync, and each seat fetches LFS content itself; use separate workspaces per writer | Post-v0.1 (contract §11) |
 | B8 | **P2 edge case:** one index-only mismatch caused by Git itself (a file/directory conflict in the index). Working-tree data is not affected | None needed | Tracked in `P2-roundtrip.md` |
@@ -143,6 +143,11 @@ Each phase adds its own limitations here when its PR opens.
   - P2 cross-platform focus cases: Linux ↔ Linux 7/7 match, 0 silent mismatches. macOS results come from CI.
   - P6 helper core (typed protocol, socket peer check, `openat2`, Compose validator) is built and unit-tested. The end-to-end run, escape checks, verdict and P8 are in progress.
 - **Phase 2 (privilege split):** *pending*.
-- **Phase 3 (local write mode):** *pending*.
+- **Phase 3 (local write mode):**
+  - `work remote --restart` only records `runtime.restart_requested`: there are no runtimes to restart until Phase 4.
+  - Stopping the server's dev processes on handoff (Q1) kills every process of the workspace user, from the server process. It moves into the helper's `SignalWorkspace` with Phase 2. In development mode (server not root) nothing is stopped.
+  - Local commits on a read-only replica are kept as local refs (`refs/armageddon/quarantine/...` in the replica), not uploaded to `checkpoints.git` as §5.5 describes. Working-tree changes are uploaded.
+  - macOS: fsnotify uses kqueue (one descriptor per watched directory), not FSEvents; the 30 s full capture is the backstop. Not run on macOS in this phase.
+  - The conformance suite (`test/conformance`) runs a small budget on every PR and a large one nightly; see the PR for the budgets run so far.
 - **Phase 4 (install and ops):** *pending*.
 - **Phase 5 (remote IDE):** *pending*.
