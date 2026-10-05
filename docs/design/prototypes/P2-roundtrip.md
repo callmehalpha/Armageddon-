@@ -124,26 +124,70 @@ What happens when such a checkpoint is applied *on* APFS is untested. The v0.1 p
 
 **Linux baseline (local):** all 7 steps `match`, 0 silent mismatches, both as `xplat-local` and as separate export and import runs.
 
-### macOS results (CI run [37312967230](https://github.com/callmehalpha/Armageddon-/actions/runs/37312967230), PR #7, `macos-latest` arm64, git 2.55.0)
+### macOS results
 
-**Verdict: FAIL against the §11 macOS criterion.** No mismatch went unflagged (0 silent mismatches in every job), but "never corrupt" does not hold. A case-only rename on macOS produces a checkpoint containing **both** the old-case and new-case paths, and a Linux replica materialises both as duplicate files. In the other direction, apply on APFS refuses case-only renames and the replica stays stuck. The fuzzer also fails at the initial seed on macOS for about a third of sequences.
+**Verdict: PASS after one fix to capture.** The first CI run (before the fix) failed the §11 criterion. The root cause was found, fixed in the prototype `gitshadow`, and the re-run is green. Every job now ends in either `match` or refused-and-detected, and there are 0 silent mismatches. The fix has not yet been applied to the production `gitshadow` (⟨P-20⟩).
+
+Environment: `macos-latest` (arm64, APFS case-insensitive), git 2.55.0, and `ubuntu-latest` for the cross-platform halves.
+
+#### Before the fix: run [37312967230](https://github.com/callmehalpha/Armageddon-/actions/runs/37312967230) (head `a294501`)
 
 | Job | Result |
 |-----|--------|
-| Focus cases, export + import on macOS | `base` match. **Case-only rename: refused** (`post-apply verify failed`); the reseed fails the same way. Every later step is then refused as diverged, so the replica is stuck. On export, APFS kept 1 of 2 names for NFC/NFD and for `Makefile`/`makefile`, as expected. 0 silent |
-| Export Linux → import macOS | `base`, exec-bit flip and `resolve collisions`: match. **Case-only rename: refused** (verify failed). NFC/NFD side by side, names differing only in case, symlink step: **refused** (diverged), with collisions flagged. 0 silent |
-| Export macOS → import Linux | Every step after `base` is **mismatch-detected**: the Linux replica has an *extra* `README.md` and `dir/file.txt` next to `readme.md` and `Dir/file.txt`. The checkpoint captured on macOS contains both cases (3 collisions flagged). Apply did **not** refuse it; only the harness's `Collisions()` check flagged it. 0 silent |
-| Fuzz on macOS, shard 0 (30 seqs × 10 rounds, seed 1) | **11 of 30 sequences fail at the initial seed** (`post-apply verify failed`). The other 19 completed 190 rounds with 0 oracle mismatches, 43 of 43 crash resumes, 27 of 27 divergence checks. `portability_collisions_detected=0` (a single case-insensitive filesystem never holds both names) |
+| Focus cases, export + import on macOS | 1 of 7 match. **Case-only rename refused** (`post-apply verify failed`), and the reseed fails the same way. Every later step is then refused as diverged, so the replica is stuck |
+| Export Linux → import macOS | Case-only rename **refused** (verify failed). NFC/NFD and case-collision steps **refused** (diverged). Exec bit, `resolve collisions`: match |
+| Export macOS → import Linux | Every step after `base` is **mismatch-detected**. The checkpoint captured on macOS held **both** `README.md` and `readme.md` (and `dir/` plus `Dir/`), so the Linux replica got duplicate files. Only the harness's `Collisions()` check flagged it; apply did not refuse it |
+| Fuzz, shard 0 (30 × 10) | **11 of 30 sequences failed at the initial seed** (`post-apply verify failed`, seeds 2, 3, 4, 6, 11, 13, 14, 16, 18, 20, 23). The other 19 ran 190 rounds with 0 oracle mismatches |
 
-**Findings**
+Silent mismatches: 0 in every job. `portability_collisions_detected=0` in the fuzz run: a single case-insensitive filesystem never holds both names, so the collision path was not involved.
 
-1. **Capture on a case-insensitive filesystem keeps stale old-case entries.** The shadow is configured with `core.ignorecase=false`. After `README.md` → `readme.md`, `lstat("README.md")` still succeeds on APFS, so the old entry is never removed from the capture index. The new name is added alongside it. *Likely cause; not traced further.* The result is a checkpoint that a case-sensitive replica turns into two files.
-2. **Apply on a case-insensitive filesystem cannot perform a case-only rename.** Deleting one case removes the file under both names; writing the other then lands on the same inode. Post-apply verify catches it (good: no corruption on the macOS side), but there is no recovery path, so the replica stays stuck.
-3. **Seeding fails on macOS for about a third of random sequences.** The fuzzer's random names include case and NFC/NFD variants that APFS folds together. *Cause not diagnosed;* a run with `-keep` on macOS is the next step.
+#### Root cause
 
-**Proposed ⟨P-20⟩ (§6.3, §6.5):**
-- **Capture** detects the filesystem's case and normalisation sensitivity, and on an insensitive one reconciles index entries against the names `readdir` actually returns, so a case-only rename is recorded as a rename, not as an addition.
-- **Apply** performs case-only renames through a temporary name.
-- **Apply refuses up front** (with a clear error, before touching the tree) any checkpoint whose paths collide under the replica's filesystem rules, instead of relying on post-apply verify.
+The capture index (`IndexFile`, the stat cache) persists between captures. The shadow is configured byte-exact (`core.ignorecase=false`, `core.precomposeunicode=false`, which is correct: names must replicate exactly). `git add -A` decides that an indexed path has been deleted by `lstat()`ing it.
 
-The same checks belong in the production `internal/treesync/gitshadow`. Not changed here: Phase 1 makes no production changes.
+On APFS, `lstat("README.md")` still **succeeds** after a rename to `readme.md`, and `lstat(<NFC name>)` succeeds when only the NFD spelling exists on disk. So the stale index entry is never removed, while the name `readdir()` actually returns is added as a new untracked path. The captured tree holds **both** spellings. This has three consequences:
+
+- **Post-apply verify on the Mac fails.** Apply writes the target tree, then re-captures the replica, and that capture also contains the stale spelling, so it never equals the checkpoint. That is the case-only-rename refusal and the stuck replica.
+- **Initial seed fails in the fuzzer.** Its random names include NFC/NFD and case variants. `Seed` captures the fresh clone first, and the clone's checkout and the capture index disagree on spelling in the same way. All 11 failures have this shape.
+- **A checkpoint captured on a Mac carries both spellings**, and a case-sensitive Linux replica materialises them as two files. That is the corruption half.
+
+This was diagnosed from the CI logs and by reading the code. It could not be reproduced on this Linux host: ext4 `casefold` needs `CONFIG_UNICODE`, which this kernel lacks. The fix below confirms it.
+
+#### Fix (prototype only): [`prototypes/internal/gitshadow/fold.go`](../../../prototypes/internal/gitshadow/fold.go)
+
+After `git add -A`, `CaptureTree` probes whether the work tree's filesystem is case- or normalisation-insensitive. It creates a probe file and `lstat`s a case-changed spelling and an NFC-changed spelling. The probe is cached per work tree.
+
+Only if the filesystem is insensitive, capture removes every index entry whose path, **component by component**, is not spelled exactly as `readdir()` returns it (`update-index --force-remove`). Linux probes as sensitive, so the check does not run there.
+
+Verification:
+- **Linux, with the check forced on** (`GITSHADOW_FORCE_FOLD_CHECK=1`): 40 sequences × 10 rounds, 0 failures; `xplat-local` 7 of 7 match. Nothing spelled correctly is ever dropped.
+- **macOS:** the CI re-run below.
+
+#### After the fix: run [37313606021](https://github.com/callmehalpha/Armageddon-/actions/runs/37313606021) (head `355ce36`), all 6 jobs green
+
+| Job | Result |
+|-----|--------|
+| Focus cases, export + import on macOS | **7 of 7 match**, 0 collisions in the checkpoints (previously 1 of 7) |
+| Export macOS → import Linux | **7 of 7 match** (previously 6 mismatch-detected, with duplicate files on Linux) |
+| Export Linux → import macOS | Case-only rename **match** (previously refused). The three steps whose checkpoint really holds two names that collide on APFS (`café.txt` NFC + NFD; `Makefile` + `makefile`; the symlink step that inherits them) are **refused** (`ErrDiverged`): detected and refused, nothing merged. `resolve collisions` matches again once the collision is gone |
+| Fuzz on macOS, shard 0 | **30 of 30 sequences, 300 rounds, 0 failures**: 67 of 67 crash resumes, 37 of 37 divergence checks, 228 rounds with staged changes |
+
+This meets the §11 criterion: "detect and report collisions, never corrupt".
+
+The macOS fuzz job now runs with `-keep` and uploads any failing sequence directories as an artifact (`p2-macos-failures-shard-N`).
+
+**Not yet run on macOS:** the full 10,000-sequence `workflow_dispatch` budget. Only the PR budget (30 sequences) has run.
+
+#### Production impact and proposed changes
+
+The production `internal/treesync/gitshadow` has **the same flaw**:
+- the same byte-exact config (`core.ignorecase=false`, `core.precomposeunicode=false`);
+- a persistent capture index;
+- `add -A` in both `CaptureTree` and the scoped path (`CaptureTreeScoped`, used for watcher-scoped capture ⟨P-12⟩).
+
+So a macOS agent replica in write mode would produce checkpoints carrying stale spellings after any case-only or normalisation-only rename. **Production code is not changed in this PR.** Phase 1 rule: a production fix lands on its own, with a macOS test.
+
+| Ref | Change | Section |
+|-----|--------|---------|
+| ⟨P-20⟩ | **Capture reconciles the index with `readdir()` spelling on case- or normalisation-insensitive filesystems.** Probe at shadow open; after `add -A` (full **and** scoped), force-remove index entries not spelled exactly as on disk. Port `fold.go` and extend it to `CaptureTreeScoped` (the prototype covers full capture only). Add a test that runs in the existing macOS leg of `ci.yml`. | §6.3 |
+| ⟨P-21⟩ | **Apply refuses up front a checkpoint whose paths collide under the replica's filesystem rules**, with an explicit "collision" error naming the paths. Today this is caught only indirectly (`ErrDiverged` mid-apply, or post-apply verify), which is safe but gives the user a misleading error. | §6.5, §6.7 |
