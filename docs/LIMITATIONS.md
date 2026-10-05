@@ -58,6 +58,7 @@ go build -o armageddon ./cmd/armageddon
 sudo install -m 0755 armageddon /usr/local/bin/armageddon
 sudo mkdir -p /srv && sudo chmod 755 /srv
 sudo test/e2e/mvp.sh /usr/local/bin/armageddon # acceptance test: expect "ALL MVP ACCEPTANCE CHECKS PASSED"
+sudo test/integration/escape.sh /usr/local/bin/armageddon  # privilege boundary (phase 2 on): expect "ALL ESCAPE-MATRIX CHECKS PASSED"
 ```
 
 Optional browser test, run against a fresh server. The setup URL is printed by `server run`:
@@ -127,7 +128,7 @@ These live on the phase branches until they merge. Run each as root on a VM:
 
 | # | Limitation | Workaround now | Planned fix |
 |---|------------|----------------|-------------|
-| B1 | **The server runs as root** and drops to workspace users in-process | Run on a dedicated VM | Phase 2: `armageddon helper` as root with only the allowlisted API; the server runs as `armageddon` |
+| B1 | ~~**The server runs as root**~~ Fixed in Phase 2: `armageddon helper` runs as root with only the allowlisted API; the server runs as `armageddon` | — | Done (M3.1); merges after the P6 verdict |
 | B2 | **Local write mode needs a running agent** (`armageddon agent run` or `follow`); `work local` refuses otherwise. Takeover is always explicit (Q2) | `armageddon agent install` writes a systemd --user unit or launchd plist; enable it once | Phase 3 (done in its PR) |
 | B3 | **No installer, ACME, update, backup or restore** | `server init/run` with `--tls-cert/--tls-key` or a reverse proxy; back up `/var/lib/armageddon` while the server is stopped | Phase 4 |
 | B4 | **No code-server or SSH endpoint** | Browser terminal | Phase 5. SSH stays off by default until P8 passes |
@@ -173,6 +174,7 @@ These live on the phase branches until they merge. Run each as root on a VM:
   - cgroup v2 limits ran only in their fallback mode (A1).
   - The server has no `fsck` path in v0.1, so the escape test E5 covers push, fetch and capture.
   - The upgrade test fakes the MVP layout with `chown`.
+  - Each workspace command costs one extra process (the `helper-exec` shim) and one helper round trip; not yet measured.
   - Other e2e scripts must use the two-process setup, because `server run` as root refuses to start without a helper unless given `--dev`.
 - **Phase 3 (local write mode, #10):**
   - `work remote --restart` only records `runtime.restart_requested`: there are no runtimes to restart until Phase 4.

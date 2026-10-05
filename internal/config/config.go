@@ -20,6 +20,10 @@ type Server struct {
 	// CaptureIntervalMS is how often the server seat is checked for changes
 	// (polling stands in for the watcher in the MVP).
 	CaptureIntervalMS int `json:"capture_interval_ms"`
+	// RunDir holds the per-workspace authority sockets (P-14). Default:
+	// the directory of the helper socket (/run/armageddon), or a private
+	// temp directory without a helper.
+	RunDir string `json:"run_dir,omitempty"`
 }
 
 func DefaultDataDir() string {

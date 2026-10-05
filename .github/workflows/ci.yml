@@ -25,7 +25,8 @@ jobs:
       - run: go build -o armageddon ./cmd/armageddon
 
   e2e:
-    # MVP acceptance test: real server as root with per-workspace users.
+    # MVP acceptance test: helper as root, server as the armageddon user,
+    # per-workspace users.
     runs-on: ubuntu-latest
     needs: test
     steps:
@@ -39,3 +40,20 @@ jobs:
           sudo install -m 0755 armageddon /usr/local/bin/armageddon
           sudo mkdir -p /srv && sudo chmod 755 /srv
           sudo -E env "PATH=$PATH" test/e2e/mvp.sh /usr/local/bin/armageddon
+
+  integration:
+    # Privilege-split escape matrix (contract §2.5, M3.1/M3.2): helper as
+    # root, server as the armageddon user, attacks from workspace users.
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build -o armageddon ./cmd/armageddon
+      - name: escape matrix
+        run: |
+          sudo install -m 0755 armageddon /usr/local/bin/armageddon
+          sudo mkdir -p /srv && sudo chmod 755 /srv
+          sudo -E env "PATH=$PATH" test/integration/escape.sh /usr/local/bin/armageddon

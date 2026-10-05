@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,9 +15,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/callmehalpha/Armageddon-/internal/helper"
 	"github.com/callmehalpha/Armageddon-/internal/ids"
 	"github.com/callmehalpha/Armageddon-/internal/store"
-	"github.com/callmehalpha/Armageddon-/internal/sysuser"
 	"github.com/callmehalpha/Armageddon-/internal/treesync/gitshadow"
 )
 
@@ -54,14 +55,19 @@ func (s *Server) pathsFor(id string) paths {
 type runtime struct {
 	id   string
 	p    paths
-	acct *sysuser.Account
-	seat *gitshadow.Shadow // server seat capture, runs as the workspace user
-	cps  *gitshadow.Shadow // checkpoints.git, server-owned (WorkTree unused)
+	acct *helper.Account // ws-<id>; every process "in" the workspace goes through it
+
+	authority *net.UnixListener // hooks → authority socket (P-14)
+	seat      *gitshadow.Shadow // server seat capture, runs as the workspace user
+	cps       *gitshadow.Shadow // checkpoints.git, server-owned (WorkTree unused)
 
 	// fence: receive-pack holds it as a reader, lease transitions as a writer (§4.2).
 	fence sync.RWMutex
 	// commitMu serialises authority commands for this workspace (§4.1).
 	commitMu sync.Mutex
+	// captureMu serialises server-seat captures (the loop and explicit
+	// syncs share the seat's capture index).
+	captureMu sync.Mutex
 
 	notifyMu sync.Mutex
 	notify   chan struct{} // closed and replaced on every committed checkpoint
@@ -86,6 +92,9 @@ func (rt *runtime) stop() {
 	if rt.cancel != nil {
 		rt.cancel()
 	}
+	if rt.authority != nil {
+		rt.authority.Close()
+	}
 }
 
 func (s *Server) runtimeFor(id string) *runtime {
@@ -96,9 +105,12 @@ func (s *Server) runtimeFor(id string) *runtime {
 
 func (s *Server) newRuntime(w *store.Workspace) (*runtime, error) {
 	p := s.pathsFor(w.ID)
-	acct, err := sysuser.Ensure(w.OSUser, p.Home)
+	acct, err := s.helper.CreateWorkspaceUser(context.Background(), w.ID)
 	if err != nil {
 		return nil, err
+	}
+	if s.helper.Isolated() && acct.Name != w.OSUser {
+		return nil, fmt.Errorf("workspace user is %s, expected %s", acct.Name, w.OSUser)
 	}
 	rt := &runtime{id: w.ID, p: p, acct: acct, notify: make(chan struct{})}
 	rt.seat = &gitshadow.Shadow{GitDir: p.SeatShadow, WorkTree: p.Tree, IndexFile: p.SeatIndex,
@@ -126,6 +138,14 @@ func (s *Server) startWorkspaces(ctx context.Context) error {
 		if w.CurrentCheckpoint != "" {
 			// Recreate refs/checkpoints/current from the DB if a crash left it behind.
 			rt.cps.Git(nil, "update-ref", "refs/checkpoints/current", w.CurrentCheckpoint)
+		}
+		// Rewrite hooks (they carry the authority socket path) and open
+		// the socket.
+		if err := s.writeHooks(rt); err != nil {
+			log.Printf("workspace %s: hooks: %v", w.ID, err)
+		}
+		if err := s.listenAuthority(rt); err != nil {
+			log.Printf("workspace %s: authority socket: %v", w.ID, err)
 		}
 		s.mu.Lock()
 		s.rts[w.ID] = rt
@@ -160,7 +180,7 @@ func (s *Server) CreateWorkspace(owner *store.User, name, sourceURL string) (*st
 	now := store.Now()
 	id := ids.New()
 	w := &store.Workspace{ID: id, OwnerID: owner.ID, Name: name, Slug: slugify(name), State: StateCreating,
-		SourceKind: "empty", SourceURL: sourceURL, OSUser: sysuser.NameFor(id), CreatedAt: now, UpdatedAt: now}
+		SourceKind: "empty", SourceURL: sourceURL, OSUser: helper.UserName(id), CreatedAt: now, UpdatedAt: now}
 	if sourceURL != "" {
 		w.SourceKind = "clone"
 	}
@@ -200,6 +220,9 @@ func (s *Server) importWorkspace(w *store.Workspace, owner *store.User) error {
 		return err
 	}
 	p, a := rt.p, rt.acct
+	// The workspace directory and its server-side entries (hooks,
+	// checkpoints.git) belong to the server; repo.git, tree, home and seat
+	// are created by the helper, owned by the workspace user.
 	if err := os.MkdirAll(p.Root, 0o755); err != nil {
 		return err
 	}
@@ -209,22 +232,24 @@ func (s *Server) importWorkspace(w *store.Workspace, owner *store.User) error {
 			return err
 		}
 	}
-	for _, d := range []string{p.Home, p.SeatDir} {
-		if err := a.MkdirOwned(d, 0o700); err != nil {
-			return err
-		}
+	if err := s.helper.PrepareWorkspaceDirs(context.Background(), w.ID); err != nil {
+		return fmt.Errorf("prepare workspace directories: %w", err)
 	}
 	// Workspace user's Git identity and a guard against inherited config.
+	// Written as the workspace user: the server cannot write into home/.
 	gitcfg := fmt.Sprintf("[user]\n\tname = %s\n\temail = %s@armageddon.local\n[init]\n\tdefaultBranch = main\n", owner.Username, owner.Username)
-	if err := os.WriteFile(filepath.Join(p.Home, ".gitconfig"), []byte(gitcfg), 0o600); err != nil {
+	if err := a.WriteFile(filepath.Join(p.Home, ".gitconfig"), []byte(gitcfg), 0o600); err != nil {
 		return err
 	}
 	// Login shells read .bash_profile; keep the prompt short and relative
 	// to the workspace rather than the server's directory layout.
 	bashrc := fmt.Sprintf("export PS1='\\[\\e[1;36m\\]%s\\[\\e[0m\\]:\\W\\$ '\n", w.Slug)
-	os.WriteFile(filepath.Join(p.Home, ".bashrc"), []byte(bashrc), 0o600)
-	os.WriteFile(filepath.Join(p.Home, ".bash_profile"), []byte("[ -f ~/.bashrc ] && . ~/.bashrc\n"), 0o600)
-	a.Chown(filepath.Join(p.Home, ".gitconfig"), filepath.Join(p.Home, ".bashrc"), filepath.Join(p.Home, ".bash_profile"))
+	if err := a.WriteFile(filepath.Join(p.Home, ".bashrc"), []byte(bashrc), 0o600); err != nil {
+		return err
+	}
+	if err := a.WriteFile(filepath.Join(p.Home, ".bash_profile"), []byte("[ -f ~/.bashrc ] && . ~/.bashrc\n"), 0o600); err != nil {
+		return err
+	}
 
 	run := func(dir string, args ...string) error {
 		cmd := a.Command(dir, "git", args...)
@@ -234,11 +259,6 @@ func (s *Server) importWorkspace(w *store.Workspace, owner *store.User) error {
 			return fmt.Errorf("git %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 		}
 		return nil
-	}
-	// The workspace dir itself is root-owned; let the workspace user create
-	// repo.git and tree inside a directory it owns.
-	if err := a.MkdirOwned(p.Repo, 0o700); err != nil {
-		return err
 	}
 	if w.SourceKind == "clone" {
 		if err := run(p.Root, "clone", "--bare", "--quiet", "--", w.SourceURL, p.Repo); err != nil {
@@ -271,29 +291,29 @@ func (s *Server) importWorkspace(w *store.Workspace, owner *store.User) error {
 	if err != nil {
 		return fmt.Errorf("default branch: %w", err)
 	}
-	if err := a.MkdirOwned(p.Tree, 0o700); err != nil {
-		return err
-	}
-	// p.Tree exists, empty and owned by the workspace user: the user cannot
-	// create directories in the root-owned workspace directory itself.
+	// p.Tree exists (PrepareWorkspaceDirs), empty and owned by the
+	// workspace user, who cannot create directories in the server-owned
+	// workspace directory itself.
 	if err := run(p.Repo, "worktree", "add", "--quiet", p.Tree, strings.TrimSpace(string(head))); err != nil {
 		return err
 	}
 	if err := s.writeHooks(rt); err != nil {
 		return err
 	}
-	if err := gitshadow.Init(p.SeatShadow, rt.seat.Prepare); err != nil {
+	// The seat shadow belongs to the workspace user, including the info/
+	// files carrying the byte-exact capture settings.
+	if err := gitshadow.InitWith(p.SeatShadow, rt.seat.Prepare, a.WriteFile); err != nil {
 		return fmt.Errorf("seat shadow: %w", err)
 	}
-	// Init writes info/attributes and info/exclude itself; the workspace
-	// user must own them (they carry the byte-exact capture settings).
-	if err := a.Chown(p.SeatShadow); err != nil {
-		return err
-	}
+	// checkpoints.git belongs to the server and is never opened by
+	// workspace processes; objects reach it only as a pack stream (§2.5).
 	if err := gitshadow.Init(p.Checkpoints, nil); err != nil {
 		return fmt.Errorf("checkpoints repo: %w", err)
 	}
 	os.Chmod(p.Checkpoints, 0o700)
+	if err := s.listenAuthority(rt); err != nil {
+		return fmt.Errorf("authority socket: %w", err)
+	}
 	if err := s.store.SetWorkspaceState(w.ID, StateImporting, StateReady, "", store.Now()); err != nil {
 		return err
 	}
@@ -322,7 +342,7 @@ func (s *Server) writeHooks(rt *runtime) error {
 		return err
 	}
 	for _, h := range []string{"post-receive", "reference-transaction"} {
-		script := fmt.Sprintf("#!/bin/sh\nexec %q hook %s \"$@\"\n", s.hookBin, h)
+		script := fmt.Sprintf("#!/bin/sh\nARMAGEDDON_AUTHORITY_SOCK=%q exec %q hook %s \"$@\"\n", s.authoritySocket(rt.id), s.hookBin, h)
 		f := filepath.Join(rt.p.Hooks, h)
 		if err := os.WriteFile(f, []byte(script), 0o755); err != nil {
 			return err
@@ -365,6 +385,8 @@ func (s *Server) startCaptureLoop(ctx context.Context, rt *runtime) {
 // captureOnce captures the server seat and commits a checkpoint if the
 // working state changed. Returns the new sequence number (0 if unchanged).
 func (s *Server) captureOnce(rt *runtime) (int64, error) {
+	rt.captureMu.Lock()
+	defer rt.captureMu.Unlock()
 	w, err := s.store.WorkspaceByID(rt.id)
 	if err != nil {
 		return 0, err
