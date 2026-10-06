@@ -120,14 +120,16 @@ ensure_git() {
   case $PKG in
     apt)
       export DEBIAN_FRONTEND=noninteractive
-      apt-get update -qq
-      apt-get install -y -qq git ca-certificates curl >/dev/null
-      if ! version_ge "$(git_version)" "$MIN_GIT" && [ "$OS_ID" = debian ]; then
-        # Debian 12 ships git 2.39; backports has a supported version.
-        codename=${OS_CODENAME:-bookworm}
-        echo "deb http://deb.debian.org/debian $codename-backports main" >/etc/apt/sources.list.d/armageddon-backports.list
+      if [ "$OS_ID" = debian ] && [ "${OS_CODENAME:-}" = bookworm ]; then
+        # Debian 12 ships git 2.39; install a supported one straight from
+        # backports (the same as the Docker image).
+        echo "deb http://deb.debian.org/debian bookworm-backports main" >/etc/apt/sources.list.d/armageddon-backports.list
         apt-get update -qq
-        apt-get install -y -qq -t "$codename-backports" git >/dev/null
+        apt-get install -y -qq ca-certificates curl >/dev/null
+        apt-get install -y -qq -t bookworm-backports git
+      else
+        apt-get update -qq
+        apt-get install -y -qq git ca-certificates curl >/dev/null
       fi ;;
     dnf) dnf install -y -q git-core ca-certificates curl >/dev/null ;;
     *) die "install git $MIN_GIT or newer, then re-run" ;;
