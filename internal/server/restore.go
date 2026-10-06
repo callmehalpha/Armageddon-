@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -66,6 +67,10 @@ func (s *Server) RestoreWorkspace(w *store.Workspace, repoBundle, cpBundle, head
 			return nil, err
 		}
 	}
+	// repo.git, tree, home and seat, owned by the workspace user (§2.5).
+	if err := s.helper.PrepareWorkspaceDirs(context.Background(), w.ID); err != nil {
+		return nil, fmt.Errorf("prepare workspace directories: %w", err)
+	}
 	if err := s.prepareHome(rt, owner, w.Slug); err != nil {
 		return nil, err
 	}
@@ -79,20 +84,19 @@ func (s *Server) RestoreWorkspace(w *store.Workspace, repoBundle, cpBundle, head
 		return nil
 	}
 
-	// repo.git, as the workspace user. The bundle is copied to a file the
-	// workspace user can read, then removed.
-	if err := a.MkdirOwned(p.Repo, 0o700); err != nil {
-		return nil, err
-	}
+	// repo.git, as the workspace user. The bundle is copied next to it
+	// (the server-owned workspace directory, readable by the workspace
+	// user), fetched, then removed.
 	if err := run(p.Repo, "init", "--bare", "--quiet"); err != nil {
 		return nil, err
 	}
 	if repoBundle != "" {
-		tmp := filepath.Join(p.Repo, "restore.bundle")
-		if err := copyFile(repoBundle, tmp, 0o600); err != nil {
+		tmp := filepath.Join(p.Root, "restore.bundle")
+		if err := copyFile(repoBundle, tmp, 0o644); err != nil {
 			return nil, err
 		}
-		if err := a.Chown(tmp); err != nil {
+		// The server's umask is 077: make the copy readable explicitly.
+		if err := os.Chmod(tmp, 0o644); err != nil {
 			return nil, err
 		}
 		err := run(p.Repo, "fetch", "--quiet", "--no-write-fetch-head", tmp, "refs/*:refs/*")
@@ -131,9 +135,6 @@ func (s *Server) RestoreWorkspace(w *store.Workspace, repoBundle, cpBundle, head
 	if err != nil {
 		return nil, fmt.Errorf("current checkpoint %s: %w", w.CurrentCheckpoint, err)
 	}
-	if err := a.MkdirOwned(p.Tree, 0o700); err != nil {
-		return nil, err
-	}
 	switch {
 	case strings.HasPrefix(meta.HeadRef, "refs/heads/"):
 		err = run(p.Repo, "worktree", "add", "--quiet", p.Tree, strings.TrimPrefix(meta.HeadRef, "refs/heads/"))
@@ -148,11 +149,8 @@ func (s *Server) RestoreWorkspace(w *store.Workspace, repoBundle, cpBundle, head
 	if err := s.writeHooks(rt); err != nil {
 		return nil, err
 	}
-	if err := gitshadow.Init(p.SeatShadow, rt.seat.Prepare); err != nil {
+	if err := gitshadow.InitWith(p.SeatShadow, rt.seat.Prepare, a.WriteFile); err != nil {
 		return nil, fmt.Errorf("seat shadow: %w", err)
-	}
-	if err := a.Chown(p.SeatShadow); err != nil {
-		return nil, err
 	}
 	res := &RestoreResult{}
 	if w.CurrentCheckpoint != "" {
@@ -161,12 +159,9 @@ func (s *Server) RestoreWorkspace(w *store.Workspace, repoBundle, cpBundle, head
 		if _, err := gitshadow.TransferPack(rt.cps, rt.seat, "refs/seat/latest", w.CurrentCheckpoint, ""); err != nil {
 			return nil, fmt.Errorf("seat shadow: %w", err)
 		}
-		if err := rt.seat.Seed(w.CurrentCheckpoint); err != nil {
+		// Seed as the workspace user: it writes files in tree/ (§2.5).
+		if err := s.seatApply(rt, "", w.CurrentCheckpoint); err != nil {
 			return nil, fmt.Errorf("restore worktree: %w", err)
-		}
-		// Seed writes files from this process; hand them to the workspace user.
-		if err := a.Chown(p.Tree, p.SeatShadow); err != nil {
-			return nil, err
 		}
 		st, err := rt.seat.CaptureState()
 		if err != nil {
@@ -207,25 +202,23 @@ func reconcileCheckpointRefs(rt *runtime, w *store.Workspace) error {
 	return err
 }
 
-// prepareHome creates the workspace user's home and seat directories with
-// the default Git identity and shell prompt.
+// prepareHome writes the workspace user's Git identity and shell prompt,
+// as the workspace user.
 func (s *Server) prepareHome(rt *runtime, owner *store.User, slug string) error {
 	p, a := rt.p, rt.acct
-	for _, d := range []string{p.Home, p.SeatDir} {
-		if err := a.MkdirOwned(d, 0o700); err != nil {
-			return err
-		}
-	}
+	// Written as the workspace user: the server cannot write into home/,
+	// which PrepareWorkspaceDirs created (§2.5).
 	gitcfg := fmt.Sprintf("[user]\n\tname = %s\n\temail = %s@armageddon.local\n[init]\n\tdefaultBranch = main\n", owner.Username, owner.Username)
-	if err := os.WriteFile(filepath.Join(p.Home, ".gitconfig"), []byte(gitcfg), 0o600); err != nil {
+	if err := a.WriteFile(filepath.Join(p.Home, ".gitconfig"), []byte(gitcfg), 0o600); err != nil {
 		return err
 	}
 	// Login shells read .bash_profile; keep the prompt short and relative
 	// to the workspace rather than the server's directory layout.
 	bashrc := fmt.Sprintf("export PS1='\\[\\e[1;36m\\]%s\\[\\e[0m\\]:\\W\\$ '\n", slug)
-	os.WriteFile(filepath.Join(p.Home, ".bashrc"), []byte(bashrc), 0o600)
-	os.WriteFile(filepath.Join(p.Home, ".bash_profile"), []byte("[ -f ~/.bashrc ] && . ~/.bashrc\n"), 0o600)
-	return a.Chown(filepath.Join(p.Home, ".gitconfig"), filepath.Join(p.Home, ".bashrc"), filepath.Join(p.Home, ".bash_profile"))
+	if err := a.WriteFile(filepath.Join(p.Home, ".bashrc"), []byte(bashrc), 0o600); err != nil {
+		return err
+	}
+	return a.WriteFile(filepath.Join(p.Home, ".bash_profile"), []byte("[ -f ~/.bashrc ] && . ~/.bashrc\n"), 0o600)
 }
 
 func copyFile(src, dst string, mode os.FileMode) error {

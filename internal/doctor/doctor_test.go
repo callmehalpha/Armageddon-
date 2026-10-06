@@ -7,25 +7,22 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
 
 	"github.com/callmehalpha/Armageddon-/internal/store"
-	"github.com/callmehalpha/Armageddon-/internal/sysuser"
 )
 
 // currentUser runs workspace Git commands as the test's own user, so the
 // fixtures never create OS accounts.
-func currentUser(name, home string) (*sysuser.Account, error) {
-	u, _ := user.Current()
-	uid, _ := strconv.Atoi(u.Uid)
-	gid, _ := strconv.Atoi(u.Gid)
-	return &sysuser.Account{Name: u.Username, UID: uint32(uid), GID: uint32(gid), Home: home}, nil
+func currentUser(wsID, osUser, dir string, args ...string) (*exec.Cmd, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = os.Environ()
+	return cmd, nil
 }
 
 func run(t *testing.T, dir string, args ...string) string {
@@ -89,7 +86,7 @@ func newFixture(t *testing.T) *fixture {
 	cg := t.TempDir()
 	os.WriteFile(filepath.Join(cg, "cgroup.controllers"), []byte("cpuset cpu io memory pids\n"), 0o644)
 	f := &fixture{data: data, id: id, cps: cps, current: cp}
-	f.env = Env{DataDir: data, CgroupRoot: cg, Account: currentUser,
+	f.env = Env{DataDir: data, CgroupRoot: cg, WorkspaceGit: currentUser,
 		Statfs:  func(string) (uint64, uint64, error) { return 50 << 30, 100 << 30, nil },
 		Openat2: func(string) error { return nil }}
 	f.env.defaults()

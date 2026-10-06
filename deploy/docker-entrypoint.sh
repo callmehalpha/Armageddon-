@@ -43,8 +43,16 @@ fi
 
 if [ -n "$helper" ]; then
   chown armageddon:armageddon "$DATA"
-  armageddon helper &
-  exec setpriv --reuid=armageddon --regid=armageddon --init-groups armageddon server run --data "$DATA"
+  sock=/run/armageddon/helper.sock
+  armageddon helper --data "$DATA" --socket "$sock" --server-user armageddon &
+  # Wait for the socket: the server must never start without the helper.
+  i=0
+  while [ ! -S "$sock" ]; do
+    i=$((i + 1))
+    [ "$i" -le 100 ] || { echo "the privileged helper did not start" >&2; exit 1; }
+    sleep 0.1
+  done
+  exec setpriv --reuid=armageddon --regid=armageddon --init-groups armageddon server run --data "$DATA" --helper-socket "$sock"
 fi
 echo "NOTICE: this armageddon binary has no privileged helper yet; the server runs as root in the container."
 exec armageddon server run --data "$DATA"

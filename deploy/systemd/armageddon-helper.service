@@ -17,7 +17,7 @@ Before=armageddon.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/armageddon helper
+ExecStart=/usr/local/bin/armageddon helper --data /var/lib/armageddon --socket /run/armageddon/helper.sock --server-user armageddon
 Restart=on-failure
 RestartSec=2
 RuntimeDirectory=armageddon

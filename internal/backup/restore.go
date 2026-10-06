@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/callmehalpha/Armageddon-/internal/helper"
 	"io"
 	"os"
 	"path/filepath"
@@ -23,6 +24,10 @@ type RestoreOptions struct {
 	// the keys are not restored (a new server identity is generated).
 	Passphrase []byte
 	Log        io.Writer
+	// Helper creates workspace users and directories and runs workspace
+	// Git (§2.5). Nil means the in-process development helper (no
+	// isolation), which is only right for tests and --dev setups.
+	Helper helper.Client
 }
 
 func (o *RestoreOptions) logf(format string, args ...any) {
@@ -143,7 +148,11 @@ func Restore(o RestoreOptions) (*RestoreReport, error) {
 	if err != nil {
 		cfg = config.Default(o.DataDir)
 	}
-	s, err := server.New(cfg) // migrates the restored database if this binary is newer
+	var opts []server.Option
+	if o.Helper != nil {
+		opts = append(opts, server.WithHelper(o.Helper))
+	}
+	s, err := server.New(cfg, opts...) // migrates the restored database if this binary is newer
 	if err != nil {
 		return nil, err
 	}

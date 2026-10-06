@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 const Version = 1
@@ -32,6 +33,31 @@ type Server struct {
 	// CaptureIntervalMS is how often the server seat is checked for changes
 	// (polling stands in for the watcher in the MVP).
 	CaptureIntervalMS int `json:"capture_interval_ms"`
+	// LeaseStaleMS is T_stale: a device holding the lease with no heartbeat
+	// for this long is shown as STALE (contract §3.2; default 2 min).
+	LeaseStaleMS int `json:"lease_stale_ms,omitempty"`
+	// HandoffTimeoutMS is T_handoff: how long a holder has to flush and
+	// release before the handoff fails (contract §3.2; default 30 s).
+	HandoffTimeoutMS int `json:"handoff_timeout_ms,omitempty"`
+	// RunDir holds the per-workspace authority sockets (P-14). Default:
+	// the directory of the helper socket (/run/armageddon), or a private
+	// temp directory without a helper.
+	RunDir string `json:"run_dir,omitempty"`
+}
+
+// TStale and THandoff return the lease timers with their defaults applied.
+func (c *Server) TStale() time.Duration {
+	if c.LeaseStaleMS > 0 {
+		return time.Duration(c.LeaseStaleMS) * time.Millisecond
+	}
+	return 2 * time.Minute
+}
+
+func (c *Server) THandoff() time.Duration {
+	if c.HandoffTimeoutMS > 0 {
+		return time.Duration(c.HandoffTimeoutMS) * time.Millisecond
+	}
+	return 30 * time.Second
 }
 
 func DefaultDataDir() string {

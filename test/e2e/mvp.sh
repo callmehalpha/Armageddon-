@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# MVP acceptance test (implementation plan §0). Runs a real server as root
-# (workspace isolation on) and a simulated laptop on the same machine.
+# MVP acceptance test (implementation plan §0), with the privilege split of
+# M3.1: `armageddon helper` runs as root, `armageddon server run` runs as the
+# unprivileged `armageddon` user (created if missing), and a simulated laptop
+# runs on the same machine.
 #
 #   sudo test/e2e/mvp.sh [path/to/armageddon]
 #
@@ -12,7 +14,11 @@
 #   5. destroy the laptop replica, clone again: identical tree, index, history
 #   6. a local edit on the replica is quarantined, never silently lost
 #   7. uncommitted work survives a server restart
-set -euo pipefail
+#   8. git access control
+#   9. only the helper runs as root
+set -Eeuo pipefail
+# A failing command outside `check` aborts the run: say which one.
+trap 'printf "\033[31mFAIL\033[0m command failed (line %s): %s\n" "$LINENO" "$BASH_COMMAND"' ERR
 
 BIN=${1:-$(command -v armageddon)}
 BIN=$(readlink -f "$BIN")
@@ -21,6 +27,9 @@ B=http://127.0.0.1:$PORT
 ROOT=${E2E_ROOT:-/srv/armageddon-e2e-$$}
 DATA=$ROOT/server
 LAPTOP=$ROOT/laptop
+RUN=$ROOT/run
+SOCK=$RUN/helper.sock
+SERVER_USER=${SERVER_USER:-armageddon}
 export ARMAGEDDON_CONFIG_DIR=$LAPTOP/config ARMAGEDDON_DATA_DIR=$LAPTOP/data
 SOURCE_URL=${SOURCE_URL:-https://github.com/octocat/Hello-World.git}
 # Throwaway credentials for the throwaway server this test creates.
@@ -32,15 +41,28 @@ pass() { printf '\033[32mPASS\033[0m %s\n' "$*"; }
 check() { local d=$1; shift; if "$@"; then pass "$d"; else fail "$d"; fi; }
 fail() { printf '\033[31mFAIL\033[0m %s\n' "$*"; exit 1; }
 step() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
-SERVER_PID=
-cleanup() { [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null || true; }
+SERVER_PID='' HELPER_PID='' FOLLOW_PID=''
+cleanup() {
+  for p in $SERVER_PID $HELPER_PID $FOLLOW_PID; do kill "$p" 2>/dev/null || true; done
+}
 trap cleanup EXIT
 
-[ "$(id -u)" = 0 ] || fail "run as root (workspace isolation needs it)"
-rm -rf "$ROOT"; mkdir -p "$ROOT" "$LAPTOP"; chmod 755 "$ROOT"
+[ "$(id -u)" = 0 ] || fail "run as root (the helper needs it; the server drops to $SERVER_USER)"
+id "$SERVER_USER" >/dev/null 2>&1 || useradd --system --user-group --no-create-home --shell /usr/sbin/nologin "$SERVER_USER" 2>/dev/null || id "$SERVER_USER" >/dev/null
+rm -rf "$ROOT"; mkdir -p "$ROOT" "$LAPTOP" "$DATA"; chmod 755 "$ROOT"
+chown "$SERVER_USER:" "$DATA"
 
+# as_server CMD...: run as the server user in the foreground.
+as_server() { setpriv --reuid="$SERVER_USER" --regid="$SERVER_USER" --clear-groups -- env HOME="$DATA" "$@"; }
+start_helper() {
+  "$BIN" helper --data "$DATA" --socket "$SOCK" --server-user "$SERVER_USER" >>"$ROOT/helper.log" 2>&1 &
+  HELPER_PID=$!
+  for _ in $(seq 50); do [ -S "$SOCK" ] && return; sleep 0.1; done
+  fail "helper did not start"
+}
 start_server() {
-  "$BIN" server run --data "$DATA" >>"$ROOT/server.log" 2>&1 &
+  setpriv --reuid="$SERVER_USER" --regid="$SERVER_USER" --clear-groups -- env HOME="$DATA" \
+    "$BIN" server run --data "$DATA" --helper-socket "$SOCK" >>"$ROOT/server.log" 2>&1 &
   SERVER_PID=$!
   for _ in $(seq 50); do curl -sf "$B/healthz" >/dev/null && return; sleep 0.2; done
   fail "server did not start"
@@ -53,7 +75,7 @@ json() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
 wait_ready() { # wait_ready ID
   for _ in $(seq 120); do
     st=$(api GET "/api/workspaces/$1" | json 'd["state"]')
-    [ "$st" = ready ] && return; [ "$st" = failed ] && fail "workspace $1 failed: $(api GET /api/workspaces/$1 | json 'd["state_reason"]')"
+    [ "$st" = ready ] && return; [ "$st" = failed ] && fail "workspace $1 failed: $(api GET "/api/workspaces/$1" | json 'd["state_reason"]')"
     sleep 0.5
   done; fail "workspace $1 not ready"
 }
@@ -100,8 +122,12 @@ same_index() { [ "$(git -C "$LAPTOP/replica" ls-files -s)" = "$(as_ws "$WS" 'git
 same_head() { [ "$(git -C "$LAPTOP/replica" rev-parse HEAD)" = "$(as_ws "$WS" 'git rev-parse HEAD')" ]; }
 
 step "1. server and first admin"
-"$BIN" server init --data "$DATA" --listen "127.0.0.1:$PORT" --public-url "$B" >/dev/null
+as_server "$BIN" server init --data "$DATA" --listen "127.0.0.1:$PORT" --public-url "$B" >/dev/null
+start_helper
 start_server
+check "helper runs as root" test "$(ps -o uid= -p "$HELPER_PID" | tr -d ' ')" = 0
+check "server runs as $SERVER_USER" test "$(ps -o uid= -p "$SERVER_PID" | tr -d ' ')" = "$(id -u "$SERVER_USER")"
+check "helper socket is 0600 and owned by $SERVER_USER" test "$(stat -c '%a %U' "$SOCK")" = "600 $SERVER_USER"
 TOKEN=$(grep -o 'setup?token=[a-z0-9]*' "$ROOT/server.log" | head -1 | cut -d= -f2)
 [ -n "$TOKEN" ] || fail "no setup token printed"
 curl -sf -c "$ROOT/jar" -X POST "$B/api/setup" -H 'Content-Type: application/json' \
@@ -120,6 +146,8 @@ OWNER=$(stat -c %U "$DATA/workspaces/$WS/tree")
 check "worktree owned by isolated user $OWNER" test "${OWNER#ws-}" != "$OWNER"
 check "workspace user cannot read the database" bash -c "! runuser -u $OWNER -- cat '$DATA/armageddon.db' >/dev/null 2>&1"
 check "workspace user cannot read the checkpoints repository" bash -c "! runuser -u $OWNER -- ls '$DATA/workspaces/$WS/checkpoints.git' >/dev/null 2>&1"
+check "workspace user cannot connect to the helper socket" bash -c "! runuser -u $OWNER -- python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])' '$SOCK' 2>/dev/null"
+check "checkpoints.git is owned by the server user" test "$(stat -c %U "$DATA/workspaces/$WS/checkpoints.git")" = "$SERVER_USER"
 OTHER=$(stat -c %U "$DATA/workspaces/$EMPTY/tree")
 check "workspace users are isolated from each other ($OWNER vs $OTHER)" bash -c "! runuser -u $OWNER -- ls '$DATA/workspaces/$EMPTY/tree' >/dev/null 2>&1"
 
@@ -198,5 +226,12 @@ DELETED=$(as_ws "$WS" "git rev-parse master 2>/dev/null || git rev-parse HEAD~1"
 as_ws "$WS" "git branch -q doomed $DELETED && git branch -q -D doomed"
 check "deleting a branch on the server seat leaves a recoverable trash ref" bash -c "runuser -u $OWNER -- git --git-dir='$DATA/workspaces/$WS/repo.git' for-each-ref --format='%(objectname) %(refname)' refs/armageddon/trash/ | grep -q '$DELETED .*/delete/heads/doomed'"
 check "trash ref hidden from clients" bash -c "! git -C '$LAPTOP/replica' ls-remote armageddon | grep -q refs/armageddon"
+check "hooks reported the deletion to the authority socket" bash -c "curl -sf -b '$ROOT/jar' '$B/api/workspaces/$WS/events' | grep -q refs.updated"
+
+step "9. privilege split"
+# Every process of this binary that runs as root must be the helper itself.
+ROOT_PIDS=$(ps -eo pid=,uid=,args= | awk -v bin="$BIN" '$2 == 0 && $3 == bin {print $1}' | sort -u)
+ROOT_PIDS=$(echo "$ROOT_PIDS" | xargs)
+check "only the helper runs as root (root pids: $ROOT_PIDS)" test "$ROOT_PIDS" = "$HELPER_PID"
 
 printf '\n\033[32mALL MVP ACCEPTANCE CHECKS PASSED\033[0m\n'

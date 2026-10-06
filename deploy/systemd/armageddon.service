@@ -13,7 +13,10 @@ Requires=armageddon-helper.service
 Type=simple
 User=armageddon
 Group=armageddon
-ExecStart=/usr/local/bin/armageddon server run --data /var/lib/armageddon
+# The server must never run without the helper: name the socket (an
+# unreachable socket is then an error, not development mode) and wait for it.
+ExecStartPre=/bin/sh -c 'i=0; while [ ! -S /run/armageddon/helper.sock ]; do i=$((i+1)); [ $i -le 100 ] || exit 1; sleep 0.1; done'
+ExecStart=/usr/local/bin/armageddon server run --data /var/lib/armageddon --helper-socket /run/armageddon/helper.sock
 Restart=on-failure
 RestartSec=2
 LimitNOFILE=65536

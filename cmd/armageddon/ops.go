@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/callmehalpha/Armageddon-/internal/helper"
 	"net"
 	"os"
 	"os/exec"
@@ -25,7 +26,6 @@ import (
 	"github.com/callmehalpha/Armageddon-/internal/lifecycle"
 	"github.com/callmehalpha/Armageddon-/internal/release"
 	"github.com/callmehalpha/Armageddon-/internal/store"
-	"github.com/callmehalpha/Armageddon-/internal/sysuser"
 	"github.com/callmehalpha/Armageddon-/internal/tlsedge"
 )
 
@@ -291,12 +291,13 @@ func serverBackup(_ context.Context, args []string) error {
 	data := fs.String("data", config.DefaultDataDir(), "data directory")
 	to := fs.String("to", "", "directory to write the backup into (default <data>/backups)")
 	pf := fs.String("passphrase-file", "", "include keys/, encrypted with the passphrase in this file (or $ARMAGEDDON_BACKUP_PASSPHRASE)")
+	helperSock := fs.String("helper-socket", "", "privileged helper socket, used to run Git as workspace users (default "+helper.DefaultSocket+")")
 	fs.Parse(args)
 	pw, err := passphrase(*pf)
 	if err != nil {
 		return err
 	}
-	dir, err := backup.Run(backup.Options{DataDir: *data, To: *to, Passphrase: pw, ServerVersion: version, Log: os.Stdout})
+	dir, err := backup.Run(backup.Options{DataDir: *data, To: *to, Passphrase: pw, ServerVersion: version, Log: os.Stdout, HelperSocket: *helperSock})
 	if err != nil {
 		return err
 	}
@@ -312,15 +313,27 @@ func serverRestore(_ context.Context, args []string) error {
 	data := fs.String("data", config.DefaultDataDir(), "fresh data directory to restore into")
 	pf := fs.String("passphrase-file", "", "passphrase for the encrypted keys (or $ARMAGEDDON_BACKUP_PASSPHRASE)")
 	owner := fs.String("owner", "", "user that runs the server; server files are chowned to it")
+	helperSock := fs.String("helper-socket", "", "privileged helper socket (default "+helper.DefaultSocket+")")
+	dev := fs.Bool("dev", false, "development mode: no helper, everything runs as the current user (no isolation)")
 	fs.Parse(reorder(args))
 	if fs.NArg() != 1 {
-		return errors.New("usage: armageddon server restore <backup-dir> [--data DIR] [--passphrase-file F]")
+		return errors.New("usage: armageddon server restore <backup-dir> [--data DIR] [--passphrase-file F] [--helper-socket PATH | --dev]")
 	}
 	pw, err := passphrase(*pf)
 	if err != nil {
 		return err
 	}
-	rep, err := backup.Restore(backup.RestoreOptions{Backup: fs.Arg(0), DataDir: *data, Passphrase: pw, Log: os.Stdout})
+	abs, err := filepath.Abs(*data)
+	if err != nil {
+		return err
+	}
+	// Workspaces are rebuilt by their own OS users through the helper,
+	// exactly as the server creates them; run this as the server user.
+	client, _, err := pickHelper(abs, *helperSock, *dev)
+	if err != nil {
+		return err
+	}
+	rep, err := backup.Restore(backup.RestoreOptions{Backup: fs.Arg(0), DataDir: abs, Passphrase: pw, Log: os.Stdout, Helper: client})
 	if rep != nil {
 		fmt.Printf("%d workspaces restored, %d failed\n", len(rep.Restored), len(rep.Failed))
 	}
@@ -392,9 +405,11 @@ func serverUninstall(_ context.Context, args []string) error {
 			}
 			return nil
 		}
+		// uninstall runs as root, after the helper is stopped: delete only
+		// the server user and names that are workspace users.
 		u.DeleteUser = func(n string) error {
-			if n != "armageddon" {
-				return sysuser.Delete(n)
+			if n != "armageddon" && !helper.ValidUserName(n) {
+				return fmt.Errorf("refusing to delete %q: not an Armageddon user", n)
 			}
 			return exec.Command("userdel", n).Run()
 		}

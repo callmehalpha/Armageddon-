@@ -22,7 +22,8 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/callmehalpha/Armageddon-/internal/config"
-	"github.com/callmehalpha/Armageddon-/internal/sysuser"
+	"github.com/callmehalpha/Armageddon-/internal/helper"
+	"github.com/callmehalpha/Armageddon-/internal/wsgit"
 
 	_ "modernc.org/sqlite"
 )
@@ -65,8 +66,9 @@ type Env struct {
 	FsckSample int
 	// Repair fixes what can be fixed safely (checkpoint refs from the DB).
 	Repair bool
-	// Account returns the OS account for a workspace's Git commands.
-	Account func(name, home string) (*sysuser.Account, error)
+	// WorkspaceGit builds a Git command that runs as the workspace's OS
+	// user (§2.5: Git on repo.git never runs as root or the server).
+	WorkspaceGit wsgit.Func
 }
 
 func (e *Env) defaults() {
@@ -88,8 +90,8 @@ func (e *Env) defaults() {
 	if e.FsckSample == 0 {
 		e.FsckSample = 3
 	}
-	if e.Account == nil {
-		e.Account = sysuser.Ensure
+	if e.WorkspaceGit == nil {
+		e.WorkspaceGit = wsgit.New(e.DataDir, e.HelperSocket)
 	}
 }
 
@@ -431,16 +433,15 @@ func CheckFsck(e *Env, wss []wsRow) Result {
 		}
 		name := w.OSUser
 		if name == "" {
-			name = sysuser.NameFor(w.ID)
+			name = helper.UserName(w.ID)
 		}
-		acct, err := e.Account(name, filepath.Join(root, "home"))
-		if err != nil {
+		if _, err := e.WorkspaceGit(w.ID, name, root, "--version"); err != nil {
 			bad = append(bad, fmt.Sprintf("%s: workspace user: %v", w.Slug, err))
 			emptyTreeOnly = false
 			continue
 		}
 		asWS := func(args ...string) *exec.Cmd {
-			cmd := acct.Command(root, e.Git, append([]string{"--git-dir=" + filepath.Join(root, "repo.git")}, args...)...)
+			cmd, _ := e.WorkspaceGit(w.ID, name, root, append([]string{"--git-dir=" + filepath.Join(root, "repo.git")}, args...)...)
 			cmd.Env = append(cmd.Env, "GIT_CONFIG_NOSYSTEM=1")
 			return cmd
 		}

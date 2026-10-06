@@ -25,7 +25,8 @@ jobs:
       - run: go build -o armageddon ./cmd/armageddon
 
   e2e:
-    # MVP acceptance test: real server as root with per-workspace users.
+    # MVP acceptance test: helper as root, server as the armageddon user,
+    # per-workspace users.
     runs-on: ubuntu-latest
     needs: test
     steps:
@@ -41,6 +42,55 @@ jobs:
           sudo -E env "PATH=$PATH" test/e2e/mvp.sh /usr/local/bin/armageddon
       - name: operations test (TLS pinning, doctor, backup/restore)
         run: sudo -E env "PATH=$PATH" PORT=8104 test/e2e/ops.sh /usr/local/bin/armageddon
+
+  integration:
+    # Privilege-split escape matrix (contract §2.5, M3.1/M3.2): helper as
+    # root, server as the armageddon user, attacks from workspace users.
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build -o armageddon ./cmd/armageddon
+      - name: escape matrix
+        run: |
+          sudo install -m 0755 armageddon /usr/local/bin/armageddon
+          sudo mkdir -p /srv && sudo chmod 755 /srv
+          sudo -E env "PATH=$PATH" test/integration/escape.sh /usr/local/bin/armageddon
+
+  e2e-write:
+    # Local write mode acceptance test (plan M7): north star + F2, F3, F4, F11, F18.
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build -o armageddon ./cmd/armageddon
+      - name: write-mode acceptance test
+        run: |
+          sudo install -m 0755 armageddon /usr/local/bin/armageddon
+          sudo mkdir -p /srv && sudo chmod 755 /srv
+          sudo -E env "PATH=$PATH" test/e2e/write.sh /usr/local/bin/armageddon
+
+  conformance:
+    # P4 scenario generator against the real server and two agents, small
+    # budget. The big budget runs nightly (conformance.yml).
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: protocol conformance (small budget)
+        env:
+          CONFORMANCE_RUNS: "2"
+          CONFORMANCE_STEPS: "30"
+        run: go test ./test/conformance -run Conformance -v -timeout 25m
 
   installer:
     # install.sh without touching the runner: --prefix into a temp root.

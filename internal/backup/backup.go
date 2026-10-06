@@ -43,8 +43,9 @@ import (
 	"golang.org/x/crypto/scrypt"
 
 	"github.com/callmehalpha/Armageddon-/internal/config"
+	"github.com/callmehalpha/Armageddon-/internal/helper"
 	"github.com/callmehalpha/Armageddon-/internal/release"
-	"github.com/callmehalpha/Armageddon-/internal/sysuser"
+	"github.com/callmehalpha/Armageddon-/internal/wsgit"
 	"github.com/callmehalpha/Armageddon-/internal/wslock"
 
 	_ "modernc.org/sqlite"
@@ -89,10 +90,13 @@ type Options struct {
 	// LockTimeout bounds how long to wait for a workspace's commit lock.
 	LockTimeout   time.Duration
 	ServerVersion string
-	// Account returns the OS account a workspace's Git commands run as.
-	// Default: sysuser.Ensure.
-	Account func(name, home string) (*sysuser.Account, error)
-	Log     io.Writer
+	// WorkspaceGit builds Git commands that run as a workspace's OS user
+	// (§2.5). Default: wsgit.New(DataDir, HelperSocket).
+	WorkspaceGit wsgit.Func
+	// HelperSocket is the privileged helper's socket (default
+	// /run/armageddon/helper.sock).
+	HelperSocket string
+	Log          io.Writer
 }
 
 func (o *Options) logf(format string, args ...any) {
@@ -109,8 +113,8 @@ func Run(o Options) (string, error) {
 	if o.LockTimeout == 0 {
 		o.LockTimeout = 2 * time.Minute
 	}
-	if o.Account == nil {
-		o.Account = sysuser.Ensure
+	if o.WorkspaceGit == nil {
+		o.WorkspaceGit = wsgit.New(o.DataDir, o.HelperSocket)
 	}
 	dbPath := filepath.Join(o.DataDir, "armageddon.db")
 	if _, err := os.Stat(dbPath); err != nil {
@@ -216,11 +220,10 @@ func backupWorkspace(o *Options, out string, w *Workspace) error {
 	repo, cps := filepath.Join(root, "repo.git"), filepath.Join(root, "checkpoints.git")
 	name := w.OSUser
 	if name == "" {
-		name = sysuser.NameFor(w.ID)
+		name = helper.UserName(w.ID)
 	}
-	acct, err := o.Account(name, filepath.Join(root, "home"))
-	if err != nil {
-		return err
+	if _, err := o.WorkspaceGit(w.ID, name, repo, "--version"); err != nil {
+		return fmt.Errorf("workspace user: %w", err)
 	}
 	dir := filepath.Join(out, "workspaces", w.ID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -233,7 +236,7 @@ func backupWorkspace(o *Options, out string, w *Workspace) error {
 	defer unlock()
 	// repo.git is workspace-writable: Git runs as the workspace user (§2.5).
 	asWS := func(args ...string) *exec.Cmd {
-		c := acct.Command(repo, "git", args...)
+		c, _ := o.WorkspaceGit(w.ID, name, repo, args...)
 		c.Env = append(c.Env, "GIT_DIR="+repo, "GIT_CONFIG_NOSYSTEM=1")
 		return c
 	}
