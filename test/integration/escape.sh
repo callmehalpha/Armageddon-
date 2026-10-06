@@ -173,7 +173,25 @@ refused "H unknown field" ctl '{"op":"CreateWorkspaceUser","workspace":"'"$A"'",
 refused "H workspace ID with a path" ctl '{"op":"PrepareWorkspaceDirs","workspace":"../../etc"}'
 refused "H git-service runs only git" ctl "$(spawn_req "$A" git-service "$WA/tree" '["sh","-c","id"]')" --stdio
 refused "H pty-shell runs only a shell" ctl "$(spawn_req "$A" pty-shell "$WA/tree" '["/usr/bin/python3"]')"
-refused "H reserved kind code-server" ctl "$(spawn_req "$A" code-server "$WA/tree" '["true"]')" --stdio
+refused "H code-server runs only the configured code-server" ctl "$(spawn_req "$A" code-server "$WA/tree" '["/bin/sh","-c","id"]')" --stdio
+refused "H ssh-session runs only a shell or the SFTP server" ctl "$(spawn_req "$A" ssh-session "$WA/tree" '["/usr/bin/python3","-c","1"]')" --stdio
+refused "H ssh-session SFTP takes no arguments" ctl "$(spawn_req "$A" ssh-session "$WA/tree" '["sftp-server","-R"]')" --stdio
+OUT=$(ctl "$(spawn_req "$A" ssh-session "$WA/tree" '["/bin/sh","-c","id -u; grep NoNewPrivs /proc/self/status"]')" --stdio 2>/dev/null </dev/null)
+check "H ssh-session runs as $UA with no_new_privs" bash -c "echo '$OUT' | sed -n 1p | grep -qx '$(id -u "$UA")' && echo '$OUT' | grep -q 'NoNewPrivs:[[:space:]]*1'"
+# code-server: the helper accepts only the configured program, and only
+# where no workspace (or anyone but root and the server user) can replace it.
+set_cs() { as_server python3 -c 'import json,sys; p=sys.argv[1]; c=json.load(open(p)); c.setdefault("code_server",{})["path"]=sys.argv[2]; json.dump(c,open(p,"w"))' "$DATA/server.json" "$1"; }
+mkdir -p "$ROOT/cs-ok" "$ROOT/cs-ww"; chmod 755 "$ROOT/cs-ok"; chmod 777 "$ROOT/cs-ww"
+install -m 0755 /bin/true "$ROOT/cs-ok/code-server"; install -m 0755 /bin/true "$ROOT/cs-ww/code-server"
+runuser -u "$UA" -- cp /bin/true "$WA/home/code-server"
+set_cs "$ROOT/cs-ww/code-server"
+refused "H code-server in a world-writable directory" ctl "$(spawn_req "$A" code-server "$WA/tree" "[\"$ROOT/cs-ww/code-server\"]")" --stdio
+set_cs "$WA/home/code-server"
+refused "H code-server owned by a workspace user" ctl "$(spawn_req "$A" code-server "$WA/tree" "[\"$WA/home/code-server\"]")" --stdio
+set_cs "$ROOT/cs-ok/code-server"
+refused "H code-server other than the configured one" ctl "$(spawn_req "$A" code-server "$WA/tree" "[\"$ROOT/cs-ww/code-server\"]")" --stdio
+check "H the configured, root-owned code-server is accepted" ctl "$(spawn_req "$A" code-server "$WA/tree" "[\"$ROOT/cs-ok/code-server\"]")" --stdio
+set_cs ""
 refused "H cwd outside the workspace" ctl "$(spawn_req "$A" runtime-command / '["true"]')" --stdio
 refused "H stdio-less spawn" ctl "$(spawn_req "$A" runtime-command "$WA/tree" '["true"]')"
 refused "H limits without cgroup v2 or bad values" ctl '{"op":"SetWorkspaceLimits","workspace":"'"$A"'","limits":{"pids":-1}}'
