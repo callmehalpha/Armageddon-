@@ -21,13 +21,13 @@ set -euo pipefail
 
 BIN=$(readlink -f "${1:-$(command -v armageddon)}")
 HERE=$(cd "$(dirname "$0")" && pwd)
-CTL="python3 $HERE/helperctl.py"
 PORT=${PORT:-8093}
 B=http://127.0.0.1:$PORT
 ROOT=${IT_ROOT:-/srv/armageddon-it-$$}
 DATA=$ROOT/server
 RUN=$ROOT/run
 SOCK=$RUN/helper.sock
+CTL="python3 $ROOT/helperctl.py" # copied below: the checkout may be unreadable to other users
 LAPTOP=$ROOT/laptop
 POISON=$ROOT/poison
 SU=${SERVER_USER:-armageddon}
@@ -55,6 +55,7 @@ trap cleanup EXIT
 [ "$(id -u)" = 0 ] || fail "run as root"
 id "$SU" >/dev/null 2>&1 || useradd --system --user-group --no-create-home --shell /usr/sbin/nologin "$SU" 2>/dev/null || id "$SU" >/dev/null
 rm -rf "$ROOT"; mkdir -p "$DATA" "$LAPTOP" "$POISON"; chmod 755 "$ROOT"; chown "$SU:" "$DATA"
+install -m 0644 "$HERE/helperctl.py" "$ROOT/helperctl.py"
 chmod 1777 "$POISON"
 
 as_server() { setpriv --reuid="$SU" --regid="$SU" --clear-groups -- env HOME="$DATA" "$@"; }
