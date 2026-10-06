@@ -23,7 +23,7 @@ set -eu
 ARMAGEDDON_PUBKEY=${ARMAGEDDON_PUBKEY:-""}
 BASE=https://github.com/callmehalpha/Armageddon-/releases
 BUNDLE='' VERSION='' PREFIX='' DATA=/var/lib/armageddon NO_START='' SKIP_REQ='' ALLOW_UNSIGNED=''
-MIN_GIT=2.40
+MIN_GIT=2.39
 
 say() { printf '==> %s\n' "$*"; }
 warn() { printf 'WARNING: %s\n' "$*" >&2; }
@@ -64,8 +64,6 @@ detect_os() {
   OS_VERSION=$(. /etc/os-release && echo "${VERSION_ID:-}")
   # shellcheck disable=SC1091
   OS_LIKE=$(. /etc/os-release && echo "${ID_LIKE:-}")
-  # shellcheck disable=SC1091
-  OS_CODENAME=$(. /etc/os-release && echo "${VERSION_CODENAME:-}")
   case " $OS_ID $OS_LIKE " in
     *" debian "*|*" ubuntu "*) PKG=apt ;;
     *" fedora "*|*" rhel "*|*" centos "*) PKG=dnf ;;
@@ -120,17 +118,8 @@ ensure_git() {
   case $PKG in
     apt)
       export DEBIAN_FRONTEND=noninteractive
-      if [ "$OS_ID" = debian ] && [ "${OS_CODENAME:-}" = bookworm ]; then
-        # Debian 12 ships git 2.39; install a supported one straight from
-        # backports (the same as the Docker image).
-        echo "deb http://deb.debian.org/debian bookworm-backports main" >/etc/apt/sources.list.d/armageddon-backports.list
-        apt-get update -qq
-        apt-get install -y -qq ca-certificates curl >/dev/null
-        apt-get install -y -qq -t bookworm-backports git
-      else
-        apt-get update -qq
-        apt-get install -y -qq git ca-certificates curl >/dev/null
-      fi ;;
+      apt-get update -qq
+      apt-get install -y -qq git ca-certificates curl >/dev/null ;;
     dnf) dnf install -y -q git-core ca-certificates curl >/dev/null ;;
     *) die "install git $MIN_GIT or newer, then re-run" ;;
   esac

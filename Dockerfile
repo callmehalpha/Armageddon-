@@ -11,11 +11,9 @@ ARG COMMIT=unknown
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" -o /out/armageddon ./cmd/armageddon
 
 FROM debian:bookworm-slim
-# git >= 2.40 (contract §9.1): Debian 12 ships 2.39, backports has a newer one.
-RUN echo 'deb http://deb.debian.org/debian bookworm-backports main' >/etc/apt/sources.list.d/backports.list \
- && apt-get update \
- && apt-get install -y --no-install-recommends -t bookworm-backports git \
- && apt-get install -y --no-install-recommends ca-certificates curl tini passwd util-linux procps \
+# git >= 2.39 (contract §9.1): Debian 12's own git.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git ca-certificates curl tini passwd util-linux procps \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --system --user-group --home-dir /var/lib/armageddon --no-create-home --shell /usr/sbin/nologin armageddon
 COPY --from=build /out/armageddon /usr/local/bin/armageddon

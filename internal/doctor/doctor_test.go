@@ -176,8 +176,8 @@ func fakeGit(t *testing.T, version string) string {
 func TestGitVersion(t *testing.T) {
 	f := newFixture(t)
 	f.env.Git = fakeGit(t, "2.30.2")
-	flagged(t, CheckGit(&f.env), Fail, "2.40 or newer")
-	f.env.Git = fakeGit(t, "2.40.0")
+	flagged(t, CheckGit(&f.env), Fail, "2.39 or newer")
+	f.env.Git = fakeGit(t, "2.39.5")
 	if r := CheckGit(&f.env); r.Status != OK {
 		t.Fatal(r)
 	}

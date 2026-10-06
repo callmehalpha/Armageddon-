@@ -13,7 +13,7 @@ sudo sh install.sh --bundle armageddon-<v>-linux-<arch>.tar
 
 The installer supports Debian 12, Ubuntu 24.04 and Fedora 40 on amd64 and
 arm64. It checks the kernel, RAM (≥ 1 GB) and disk (≥ 10 GB), installs
-git ≥ 2.40 if needed (from bookworm-backports on Debian 12), verifies the
+git ≥ 2.39 if needed (from the distribution), verifies the
 release, and lays out:
 
 ```
@@ -171,7 +171,7 @@ CI cannot cover these:
 
 1. A fresh Debian 12, Ubuntu 24.04 and Fedora 40 VPS, each with 1 GB RAM:
    `curl … | sudo sh` without `--skip-requirements`, the requirement
-   checks pass, and git on Debian comes from backports.
+   checks pass, and git ≥ 2.39 comes from the distribution.
 2. ACME against the staging CA, then production (see above).
 3. IP-only mode reached from a laptop over the internet: `armageddon
    login` shows the fingerprint, `clone` works, and replacing the
