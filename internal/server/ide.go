@@ -381,7 +381,10 @@ func (inst *ideInstance) dial(ctx context.Context) (net.Conn, error) {
 	inst.mu.Unlock()
 	if err != nil || uid != inst.rt.acct.UID || (pid != want && parentPID(pid) != want) {
 		c.Close()
-		return nil, fmt.Errorf("code-server socket is served by pid %d uid %d, not the supervised process %d", pid, uid, want)
+		err := fmt.Errorf("code-server socket is served by pid %d uid %d, not the supervised process %d", pid, uid, want)
+		log.Printf("workspace %s: refused: %v", inst.wsID, err)
+		inst.m.s.event(inst.wsID, "server", "", "ide.socket_refused", map[string]any{"peer_pid": pid, "peer_uid": uid})
+		return nil, err
 	}
 	return c, nil
 }

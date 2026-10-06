@@ -148,7 +148,9 @@ jobs:
 
   e2e-ide:
     # Phase 5: code-server proxy (with a fake code-server), SSH endpoint via
-    # the OpenSSH client, Git-provider credentials. Real server as root.
+    # the OpenSSH client, Git-provider credentials, and escapes from a second
+    # workspace. The helper runs as root, the server as the armageddon user
+    # (ide.sh sets both up, like mvp.sh).
     runs-on: ubuntu-latest
     needs: test
     steps:
