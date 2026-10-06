@@ -57,6 +57,9 @@ for _ in $(seq 60); do
   sleep 1
 done
 check "systemd is up in the container ($st)" bash -c "case '$st' in running|degraded) true ;; *) false ;; esac"
+# Host networking, but the image's /etc/resolv.conf may point into /run
+# (Fedora: systemd-resolved), which is an empty tmpfs here: use the host's.
+dx sh -c 'rm -f /etc/resolv.conf && cat >/etc/resolv.conf' </etc/resolv.conf
 
 docker cp "$D1/armageddon-$V1-linux-$ARCH.tar" "$NAME:/root/r1.tar"
 docker cp "$D2/armageddon-$V2-linux-$ARCH.tar" "$NAME:/root/r2.tar"
