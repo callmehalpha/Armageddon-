@@ -47,7 +47,7 @@ type Result struct {
 }
 
 // MinGit is the oldest supported Git (contract §9.1).
-var MinGit = [3]int{2, 40, 0}
+var MinGit = [3]int{2, 39, 0}
 
 // Env is what the checks look at. Zero values mean the real system; tests
 // substitute fixtures.
@@ -257,10 +257,10 @@ func CheckHelper(e *Env) Result {
 
 var gitVersionRe = regexp.MustCompile(`git version (\d+)\.(\d+)(?:\.(\d+))?`)
 
-// CheckGit: Git ≥ 2.40 (contract §9.1).
+// CheckGit: Git ≥ 2.39 (contract §9.1).
 func CheckGit(e *Env) Result {
 	r := Result{Check: "git"}
-	remedy := fmt.Sprintf("Install Git %d.%d or newer (Debian 12: bookworm-backports; Ubuntu: ppa:git-core/ppa; Fedora: dnf install git).", MinGit[0], MinGit[1])
+	remedy := fmt.Sprintf("Install Git %d.%d or newer (Debian 12, Ubuntu 24.04 and Fedora 40 ship a new enough git: apt or dnf install git).", MinGit[0], MinGit[1])
 	out, err := exec.Command(e.Git, "--version").Output()
 	if err != nil {
 		r.Status, r.Detail, r.Remedy = Fail, "git not found: "+err.Error(), remedy

@@ -78,7 +78,7 @@ check "armageddon.service is active" dx systemctl is-active --quiet armageddon.s
 check "server answers /healthz" dx armageddon server health --data /var/lib/armageddon --timeout 30s
 check "armageddon system user exists" dx id armageddon
 # shellcheck disable=SC2016 # expanded inside the container
-check "git >= 2.40 installed" dx sh -c 'v=$(git --version | cut -d" " -f3); [ "$(printf "%s\n2.40\n" "$v" | sort -V | head -1)" = 2.40 ]'
+check "git >= 2.39 installed" dx sh -c 'v=$(git --version | cut -d" " -f3); [ "$(printf "%s\n2.39\n" "$v" | sort -V | head -1)" = 2.39 ]'
 check "layout: current → versions/$V1" test "$(dx readlink /opt/armageddon/current)" = "versions/$V1"
 check "/usr/local/bin/armageddon runs $V1" bash -c "docker exec $NAME armageddon version | grep -q '$V1'"
 if dx /opt/armageddon/current/armageddon helper --help >/dev/null 2>&1; then
