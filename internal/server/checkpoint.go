@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/callmehalpha/Armageddon-/internal/wslock"
 	"log"
 	"strings"
 	"time"
@@ -122,6 +123,12 @@ var (
 func (s *Server) commitCheckpoint(rt *runtime, epoch int64, authorKind, authorDevice, parent, cp, kind string) (int64, error) {
 	rt.commitMu.Lock()
 	defer rt.commitMu.Unlock()
+	// The same lock across processes, so `server backup` can pause commits.
+	unlock, err := wslock.Lock(rt.p.Root)
+	if err != nil {
+		return 0, fmt.Errorf("commit lock: %w", err)
+	}
+	defer unlock()
 	if existing, err := s.store.CheckpointByID(rt.id, cp); err == nil {
 		return existing.Seq, nil // idempotent retry (F5)
 	}

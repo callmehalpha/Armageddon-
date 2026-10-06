@@ -21,13 +21,13 @@ set -euo pipefail
 
 BIN=$(readlink -f "${1:-$(command -v armageddon)}")
 HERE=$(cd "$(dirname "$0")" && pwd)
-CTL="python3 $HERE/helperctl.py"
 PORT=${PORT:-8093}
 B=http://127.0.0.1:$PORT
 ROOT=${IT_ROOT:-/srv/armageddon-it-$$}
 DATA=$ROOT/server
 RUN=$ROOT/run
 SOCK=$RUN/helper.sock
+CTL="python3 $ROOT/helperctl.py" # copied below: the checkout may be unreadable to other users
 LAPTOP=$ROOT/laptop
 POISON=$ROOT/poison
 SU=${SERVER_USER:-armageddon}
@@ -35,7 +35,13 @@ export ARMAGEDDON_CONFIG_DIR=$LAPTOP/config ARMAGEDDON_DATA_DIR=$LAPTOP/data
 ADMIN_PW=$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')
 
 pass() { printf '\033[32mPASS\033[0m %s\n' "$*"; }
-fail() { printf '\033[31mFAIL\033[0m %s\n' "$*"; exit 1; }
+fail() {
+  printf '\033[31mFAIL\033[0m %s\n' "$*"
+  for f in helper.log server.log hold.out; do
+    [ -f "$ROOT/$f" ] && { echo "--- $f (tail)"; tail -20 "$ROOT/$f"; }
+  done
+  exit 1
+}
 check() { local d=$1; shift; if "$@"; then pass "$d"; else fail "$d"; fi; }
 refused() { local d=$1; shift; if "$@" >/dev/null 2>&1; then fail "$d"; else pass "$d"; fi; }
 step() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
@@ -49,6 +55,7 @@ trap cleanup EXIT
 [ "$(id -u)" = 0 ] || fail "run as root"
 id "$SU" >/dev/null 2>&1 || useradd --system --user-group --no-create-home --shell /usr/sbin/nologin "$SU" 2>/dev/null || id "$SU" >/dev/null
 rm -rf "$ROOT"; mkdir -p "$DATA" "$LAPTOP" "$POISON"; chmod 755 "$ROOT"; chown "$SU:" "$DATA"
+install -m 0644 "$HERE/helperctl.py" "$ROOT/helperctl.py"
 chmod 1777 "$POISON"
 
 as_server() { setpriv --reuid="$SU" --regid="$SU" --clear-groups -- env HOME="$DATA" "$@"; }

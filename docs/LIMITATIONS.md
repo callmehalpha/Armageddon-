@@ -21,7 +21,7 @@ There are three kinds of limitation, and they need different responses:
 | OS (server side) | **Linux**: a VM or bare metal running Ubuntu 24.04, Debian 12 or Fedora 40. WSL2 is untested | Per-workspace Unix users, cgroups, `openat2` |
 | OS (laptop side) | Linux or macOS | The agent and CLI (`login`, `clone`, `follow`) |
 | Go | 1.26 (from `go.mod`; the toolchain auto-downloads) | Build |
-| git | ≥ 2.42 | Server repos, capture, smart HTTP |
+| git | ≥ 2.39 | Server repos, capture, smart HTTP |
 | Privileges | `sudo` / root | The acceptance test creates real OS users (`ws-*`) |
 | Node.js and Playwright | Node ≥ 20, `npx playwright install chromium` | Only for the browser UI test |
 | Docker | Optional | Only for the Docker deployment and the P6 Docker variant |
@@ -44,7 +44,7 @@ sudo apt-get update && sudo apt-get install -y git build-essential
 ```sh
 stat -fc %T /sys/fs/cgroup     # want: cgroup2fs   (tmpfs means a hybrid/v1 host: limits can't be fully tested, see A1)
 uname -r                       # want: ≥ 5.6 for openat2 (A2)
-git --version                  # want: ≥ 2.42
+git --version                  # want: ≥ 2.39
 ```
 
 ### Build and test

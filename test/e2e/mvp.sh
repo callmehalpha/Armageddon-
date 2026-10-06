@@ -41,11 +41,9 @@ pass() { printf '\033[32mPASS\033[0m %s\n' "$*"; }
 check() { local d=$1; shift; if "$@"; then pass "$d"; else fail "$d"; fi; }
 fail() { printf '\033[31mFAIL\033[0m %s\n' "$*"; exit 1; }
 step() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
-SERVER_PID= HELPER_PID= FOLLOW_PID=
+SERVER_PID='' HELPER_PID='' FOLLOW_PID=''
 cleanup() {
-  [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null || true
-  [ -n "$HELPER_PID" ] && kill "$HELPER_PID" 2>/dev/null || true
-  [ -n "$FOLLOW_PID" ] && kill "$FOLLOW_PID" 2>/dev/null || true
+  for p in $SERVER_PID $HELPER_PID $FOLLOW_PID; do kill "$p" 2>/dev/null || true; done
 }
 trap cleanup EXIT
 
@@ -77,7 +75,7 @@ json() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
 wait_ready() { # wait_ready ID
   for _ in $(seq 120); do
     st=$(api GET "/api/workspaces/$1" | json 'd["state"]')
-    [ "$st" = ready ] && return; [ "$st" = failed ] && fail "workspace $1 failed: $(api GET /api/workspaces/$1 | json 'd["state_reason"]')"
+    [ "$st" = ready ] && return; [ "$st" = failed ] && fail "workspace $1 failed: $(api GET "/api/workspaces/$1" | json 'd["state_reason"]')"
     sleep 0.5
   done; fail "workspace $1 not ready"
 }
@@ -157,6 +155,9 @@ step "3. work on the server seat"
 S0=$(seq_of "$WS")
 as_ws "$WS" "printf 'hello from the server\r\n' > notes.txt && mkdir -p src && echo 'package main' > src/main.go && git add src && git commit -qm 'add main' && echo 'staged' > staged.txt && git add staged.txt && echo 'unstaged edit' >> staged.txt && echo 'API_KEY=dev' > .env"
 wait_seq_gt "$WS" "$S0"
+# The capture loop may have committed a half-finished edit script: capture
+# the final state explicitly before testing that a further sync is a no-op.
+api POST "/api/workspaces/$WS/sync" '' >/dev/null
 S1=$(seq_of "$WS")
 pass "edits captured as checkpoint #$S1 (commit, staged, unstaged, untracked, .env)"
 api POST "/api/workspaces/$WS/sync" '' >/dev/null
@@ -233,6 +234,7 @@ check "hooks reported the deletion to the authority socket" bash -c "curl -sf -b
 step "9. privilege split"
 # Every process of this binary that runs as root must be the helper itself.
 ROOT_PIDS=$(ps -eo pid=,uid=,args= | awk -v bin="$BIN" '$2 == 0 && $3 == bin {print $1}' | sort -u)
-check "only the helper runs as root (root pids: $(echo $ROOT_PIDS))" test "$(echo $ROOT_PIDS)" = "$HELPER_PID"
+ROOT_PIDS=$(echo "$ROOT_PIDS" | xargs)
+check "only the helper runs as root (root pids: $ROOT_PIDS)" test "$ROOT_PIDS" = "$HELPER_PID"
 
 printf '\n\033[32mALL MVP ACCEPTANCE CHECKS PASSED\033[0m\n'

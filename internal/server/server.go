@@ -20,6 +20,7 @@ import (
 	"github.com/callmehalpha/Armageddon-/internal/helper"
 	"github.com/callmehalpha/Armageddon-/internal/ids"
 	"github.com/callmehalpha/Armageddon-/internal/store"
+	"github.com/callmehalpha/Armageddon-/internal/tlsedge"
 )
 
 type Server struct {
@@ -152,14 +153,18 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.janitor(ctx)
 
 	srv := &http.Server{Addr: s.cfg.Listen, Handler: s.routes(), ReadHeaderTimeout: 15 * time.Second}
+	ln, err := tlsedge.Listen(ctx, s.cfg)
+	if err != nil {
+		return err
+	}
 	errc := make(chan error, 1)
 	go func() {
-		log.Printf("armageddon server listening on %s (public URL %s)", s.cfg.Listen, s.cfg.PublicURL)
-		if s.cfg.TLSCert != "" {
-			errc <- srv.ListenAndServeTLS(s.cfg.TLSCert, s.cfg.TLSKey)
-		} else {
-			errc <- srv.ListenAndServe()
+		mode := tlsedge.Mode(s.cfg)
+		if mode == "" {
+			mode = "plain HTTP"
 		}
+		log.Printf("armageddon server listening on %s, %s (public URL %s)", s.cfg.Listen, mode, s.cfg.PublicURL)
+		errc <- srv.Serve(ln)
 	}()
 	select {
 	case <-ctx.Done():

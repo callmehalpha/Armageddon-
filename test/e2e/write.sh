@@ -48,7 +48,7 @@ fail() {
   exit 1
 }
 step() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
-SERVER_PID= HELPER_PID= PROXY_PID= AGENT_PID= SLEEP_PID=
+SERVER_PID='' HELPER_PID='' PROXY_PID='' AGENT_PID='' SLEEP_PID=''
 cleanup() {
   for p in $AGENT_PID $PROXY_PID $SERVER_PID $SLEEP_PID $HELPER_PID; do kill -9 "$p" 2>/dev/null || true; done
 }
@@ -258,7 +258,6 @@ echo "written offline, after the takeover" > "$R/lost-tail.txt"
 sleep 3
 check "forced takeover without the password is refused" test "$(api_code POST "/api/workspaces/$WS/lease/force" '{"to":"server"}')" = 401
 check "forced takeover with password re-auth" test "$(api_code POST "/api/workspaces/$WS/lease/force" "{\"to\":\"server\",\"password\":\"$ADMIN_PW\"}")" = 200
-E=$(epoch)
 check "the server seat holds a new epoch" test "$(holder)" = server
 check "lease.forced audit event recorded" bash -c "curl -sf -b '$ROOT/jar' '$B/api/workspaces/$WS/events' | grep -q lease.forced"
 as_ws "echo 'server after takeover' > after-takeover.txt"

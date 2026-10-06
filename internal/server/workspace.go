@@ -254,18 +254,7 @@ func (s *Server) importWorkspace(w *store.Workspace, owner *store.User) error {
 		return fmt.Errorf("prepare workspace directories: %w", err)
 	}
 	// Workspace user's Git identity and a guard against inherited config.
-	// Written as the workspace user: the server cannot write into home/.
-	gitcfg := fmt.Sprintf("[user]\n\tname = %s\n\temail = %s@armageddon.local\n[init]\n\tdefaultBranch = main\n", owner.Username, owner.Username)
-	if err := a.WriteFile(filepath.Join(p.Home, ".gitconfig"), []byte(gitcfg), 0o600); err != nil {
-		return err
-	}
-	// Login shells read .bash_profile; keep the prompt short and relative
-	// to the workspace rather than the server's directory layout.
-	bashrc := fmt.Sprintf("export PS1='\\[\\e[1;36m\\]%s\\[\\e[0m\\]:\\W\\$ '\n", w.Slug)
-	if err := a.WriteFile(filepath.Join(p.Home, ".bashrc"), []byte(bashrc), 0o600); err != nil {
-		return err
-	}
-	if err := a.WriteFile(filepath.Join(p.Home, ".bash_profile"), []byte("[ -f ~/.bashrc ] && . ~/.bashrc\n"), 0o600); err != nil {
+	if err := s.prepareHome(rt, owner, w.Slug); err != nil {
 		return err
 	}
 
@@ -290,7 +279,12 @@ func (s *Server) importWorkspace(w *store.Workspace, owner *store.User) error {
 			return err
 		}
 		// An initial empty commit so HEAD, the index delta and replicas all
-		// have a commit to work against.
+		// have a commit to work against. The empty tree is written as a real
+		// object first: Git only pretends it exists, and `git fsck` reports
+		// it missing otherwise (found by doctor).
+		if err := run(p.Repo, "hash-object", "-w", "-t", "tree", "/dev/null"); err != nil {
+			return err
+		}
 		cmd := a.Command(p.Repo, "git", "commit-tree", gitshadow.EmptyTree, "-m", "Initial commit (created by Armageddon)")
 		out, err := cmd.Output()
 		if err != nil {

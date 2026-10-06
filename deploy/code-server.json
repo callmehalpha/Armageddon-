@@ -1,0 +1,17 @@
+{
+  "version": "4.96.4",
+  "files": [
+    {
+      "os": "linux",
+      "arch": "amd64",
+      "url": "https://github.com/coder/code-server/releases/download/v4.96.4/code-server-4.96.4-linux-amd64.tar.gz",
+      "sha256": ""
+    },
+    {
+      "os": "linux",
+      "arch": "arm64",
+      "url": "https://github.com/coder/code-server/releases/download/v4.96.4/code-server-4.96.4-linux-arm64.tar.gz",
+      "sha256": ""
+    }
+  ]
+}

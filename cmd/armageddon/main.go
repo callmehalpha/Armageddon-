@@ -18,17 +18,32 @@ import (
 	"github.com/callmehalpha/Armageddon-/internal/server"
 )
 
-var version = "0.1.0-mvp"
+// version and commit are stamped by the release build with -ldflags -X.
+var (
+	version = "0.1.0-mvp"
+	commit  = "unknown"
+)
 
 const usage = `armageddon — your development environment survives the machine.
 
 Server:
-  armageddon server init  [--data DIR] [--listen ADDR] [--public-url URL] [--tls-cert F --tls-key F]
+  armageddon server init  [--data DIR] [--listen ADDR] [--public-url URL]
+                          [--domain D --acme-email E [--acme-staging]] | [--ip-only [--ip A,B]]
+                          | [--tls-cert F --tls-key F]
   armageddon server run   [--data DIR] [--helper-socket PATH] [--dev]
   armageddon helper       [--data DIR] [--socket PATH] [--server-user NAME]   (as root)
+  armageddon server fingerprint                  print the TLS certificate fingerprint
+  armageddon server backup [--to DIR] [--passphrase-file F]   (keys included when a passphrase is given)
+  armageddon server restore <backup-dir> [--data DIR] [--passphrase-file F]
+  armageddon server update [--to VERSION | --bundle FILE.tar]
+  armageddon server rollback [--keep-db]
+  armageddon server uninstall [--purge]
+  armageddon server migrate [--data DIR]         apply database migrations and exit
+  armageddon doctor [--data DIR] [--repair] [--json]
 
 Device:
-  armageddon login <server-url> [--name NAME]   pair this machine (approve in the browser)
+  armageddon login <server-url> [--name NAME] [--fingerprint SHA256]
+                                                 pair this machine (approve in the browser)
   armageddon workspaces                          list workspaces you can access
   armageddon clone <workspace> [dir]             create a follower replica
   armageddon agent run                           keep every replica current, and write when it holds the lease
@@ -44,6 +59,7 @@ Device:
 
 Other:
   armageddon version
+  armageddon release verify <manifest.json> <manifest.json.minisig> [--pubkey KEY] [--dir DIR]
 `
 
 func main() {
@@ -57,7 +73,7 @@ func main() {
 	var err error
 	switch cmd, args := os.Args[1], os.Args[2:]; cmd {
 	case "version", "--version":
-		fmt.Println("armageddon", version)
+		fmt.Printf("armageddon %s (commit %s)\n", version, commit)
 	case "server":
 		err = serverCmd(ctx, args)
 	case "helper":
@@ -80,12 +96,13 @@ func main() {
 	case "login":
 		fs := flag.NewFlagSet("login", flag.ExitOnError)
 		name := fs.String("name", "", "device name (default: hostname)")
+		fp := fs.String("fingerprint", "", "expected SHA-256 fingerprint of the server certificate (IP-only servers)")
 		fs.Parse(reorder(args))
 		if fs.NArg() != 1 {
 			err = fmt.Errorf("usage: armageddon login <server-url> [--name NAME]")
 			break
 		}
-		err = agent.Login(fs.Arg(0), *name, os.Stdout)
+		err = agent.Login(fs.Arg(0), *name, *fp, os.Stdout)
 	case "logout":
 		dir, _ := os.UserConfigDir()
 		err = os.RemoveAll(dir + "/armageddon")
@@ -209,6 +226,10 @@ func main() {
 			}
 			return nil
 		})
+	case "doctor":
+		err = doctorCmd(args)
+	case "release":
+		err = releaseCmd(args)
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	default:
@@ -266,37 +287,18 @@ func reorder(args []string) []string {
 
 func serverCmd(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: armageddon server init|run [flags]")
+		return fmt.Errorf("usage: armageddon server init|run|backup|restore|update|rollback|uninstall|fingerprint|migrate [flags]")
+	}
+	if op, ok := opsCommands[args[0]]; ok {
+		return op(ctx, args[1:])
 	}
 	fs := flag.NewFlagSet("server "+args[0], flag.ExitOnError)
 	data := fs.String("data", config.DefaultDataDir(), "data directory")
 	listen := fs.String("listen", "", "listen address, e.g. :8080")
-	public := fs.String("public-url", "", "URL clients use to reach this server")
-	cert := fs.String("tls-cert", "", "TLS certificate file")
-	key := fs.String("tls-key", "", "TLS key file")
 	helperSock := fs.String("helper-socket", "", "privileged helper socket (default "+helper.DefaultSocket+")")
 	dev := fs.Bool("dev", false, "development mode: no helper, everything runs as the current user (no isolation)")
 	fs.Parse(args[1:])
 	switch args[0] {
-	case "init":
-		cfg, err := config.Load(*data)
-		if err != nil {
-			cfg = config.Default(*data)
-		}
-		if *listen != "" {
-			cfg.Listen = *listen
-		}
-		if *public != "" {
-			cfg.PublicURL = strings.TrimRight(*public, "/")
-		}
-		if *cert != "" {
-			cfg.TLSCert, cfg.TLSKey = *cert, *key
-		}
-		if err := cfg.Save(); err != nil {
-			return err
-		}
-		fmt.Printf("Wrote %s\nStart the server with: armageddon server run --data %s\n", config.Path(*data), *data)
-		return nil
 	case "run":
 		abs, err := filepath.Abs(*data)
 		if err != nil {

@@ -1,0 +1,42 @@
+# Armageddon privileged helper (contract §2.5, §9.2): runs as root and
+# serves only the allowlisted API on a 0600 socket owned by `armageddon`.
+#
+# The command line is owned by Phase 2 (M3.1); keep ExecStart in step with
+# `armageddon helper --help`.
+#
+# Network: the contract asks for "no network access". PrivateNetwork= and
+# RestrictAddressFamilies= are NOT set because workspace processes the
+# helper spawns (shells, git fetch, dev servers) would inherit them and lose
+# the network too. Enforcing it needs workspace processes outside this
+# unit's namespace and cgroup (for example transient units); tracked as an
+# open point for Phase 2.
+[Unit]
+Description=Armageddon privileged helper
+Documentation=https://github.com/callmehalpha/Armageddon-
+Before=armageddon.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/armageddon helper --data /var/lib/armageddon --socket /run/armageddon/helper.sock --server-user armageddon
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=armageddon
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+# Workspace cgroups (SetWorkspaceLimits) live below this unit's cgroup.
+Delegate=yes
+# Workspace processes are not stopped with the helper; the server owns
+# their lifecycle through SignalWorkspace.
+KillMode=process
+
+# Only what the allowlisted API needs (contract §9.2).
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_KILL CAP_SYS_ADMIN
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

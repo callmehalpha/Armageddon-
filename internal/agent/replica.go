@@ -183,10 +183,19 @@ func (c *Client) fetchCheckpoint(sh *gitshadow.Shadow, wsID string, seq int64, b
 // git runs git in dir with the Armageddon credential helper configured.
 func (c *Client) git(dir string, args ...string) (string, error) {
 	self, _ := os.Executable()
-	full := append([]string{"-c", "credential.helper=", "-c", "credential.helper=!" + shellQuote(self) + " git-credential"}, args...)
+	full := []string{"-c", "credential.helper=", "-c", "credential.helper=!" + shellQuote(self) + " git-credential"}
+	if c.Cfg.CertFingerprint != "" {
+		// The pinned self-signed certificate is Git's only trust anchor.
+		full = append(full, "-c", "http.sslCAInfo="+pinnedCertPath())
+	}
+	full = append(full, args...)
 	cmd := exec.Command("git", full...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if c.Cfg.CertFingerprint != "" {
+		// GIT_SSL_CAINFO in the environment would override the -c above.
+		cmd.Env = append(cmd.Env, "GIT_SSL_CAINFO="+pinnedCertPath())
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -239,6 +248,12 @@ func (c *Client) Clone(ref, dir string, out io.Writer) error {
 	self, _ := os.Executable()
 	if _, err := c.git(abs, "config", "credential."+strings.TrimSuffix(w.GitURL, "/")+".helper", "!"+shellQuote(self)+" git-credential"); err != nil {
 		return err
+	}
+	if c.Cfg.CertFingerprint != "" {
+		// Plain `git fetch` in the replica trusts the pinned certificate too.
+		if _, err := c.git(abs, "config", "http."+strings.TrimSuffix(w.GitURL, "/")+".sslCAInfo", pinnedCertPath()); err != nil {
+			return err
+		}
 	}
 	lk, err := lockReplica(w.ID)
 	if err != nil {

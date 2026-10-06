@@ -18,7 +18,7 @@ Armageddon is a self-hosted development workspace server. Your code, Git history
 ## Quickstart
 
 ```sh
-go build -o armageddon ./cmd/armageddon            # Go ≥ 1.24 (the toolchain auto-updates as needed); git ≥ 2.42 on the server
+go build -o armageddon ./cmd/armageddon            # Go ≥ 1.24 (the toolchain auto-updates as needed); git ≥ 2.39 on the server
 sudo install -m 0755 armageddon /usr/local/bin/
 
 # Server: the server runs as the unprivileged `armageddon` user; the helper
