@@ -14,7 +14,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -39,17 +38,31 @@ var downloadBase = "https://github.com/coder/code-server/releases/download"
 // CodeServerDir is where installed versions live.
 func CodeServerDir(dataDir string) string { return filepath.Join(dataDir, "components", "code-server") }
 
+// searchPath is where ResolveCodeServer looks for code-server: the PATH of
+// workspace processes (helper.SafePath).
+const searchPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 // ResolveCodeServer finds the code-server executable: the configured path,
-// else code-server in PATH, else the installed component.
+// else code-server on searchPath, else the installed component. The
+// configured path must be absolute.
 func ResolveCodeServer(configured, dataDir string) (string, error) {
 	if configured != "" {
+		if !filepath.IsAbs(configured) {
+			return "", fmt.Errorf("code_server.path must be an absolute path, not %q", configured)
+		}
+		configured = filepath.Clean(configured)
 		if _, err := os.Stat(configured); err != nil {
 			return "", fmt.Errorf("code_server.path: %w", err)
 		}
 		return configured, nil
 	}
-	if p, err := exec.LookPath("code-server"); err == nil {
-		return filepath.Abs(p)
+	// A fixed search path, not this process's PATH: the helper resolves
+	// the same way (as root) and accepts only the program found here.
+	for _, dir := range filepath.SplitList(searchPath) {
+		p := filepath.Join(dir, "code-server")
+		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() && fi.Mode()&0o111 != 0 {
+			return p, nil
+		}
 	}
 	p := filepath.Join(CodeServerDir(dataDir), "current", "bin", "code-server")
 	if _, err := os.Stat(p); err == nil {

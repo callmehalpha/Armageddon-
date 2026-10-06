@@ -80,7 +80,17 @@ func (d *Dev) PrepareWorkspaceDirs(ctx context.Context, wsID string) error {
 
 // WorkspaceDirs are the workspace-owned directories PrepareWorkspaceDirs
 // creates under workspaces/<id>/ (contract §2.4).
-var WorkspaceDirs = []string{"repo.git", "tree", "home", "seat"}
+var WorkspaceDirs = []string{"repo.git", "tree", "home", "seat", RunDir}
+
+// RunDir holds the workspace's code-server socket. Unlike the other
+// directories it is owned by ws-<id> with the server's group and mode
+// RunDirMode: the server can reach the socket (but not create or remove
+// anything), other workspace users cannot even traverse it. The setgid bit
+// gives sockets created in it the server's group.
+const (
+	RunDir     = "run"
+	RunDirMode = 0o2750
+)
 
 type devProc struct {
 	handle string
@@ -115,9 +125,17 @@ func (d *Dev) Spawn(ctx context.Context, wsID string, spec SpawnSpec) (Process, 
 	if !within(d.wsRoot(wsID), spec.Dir) {
 		return nil, fmt.Errorf("cwd %s is outside the workspace", spec.Dir)
 	}
-	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...)
-	cmd.Dir = spec.Dir
-	cmd.Env = filterEnv(spec.Env)
+	self, _ := os.Executable()
+	prog, argv, err := programFor(spec.Kind, spec.Argv, self)
+	if err != nil {
+		return nil, err
+	}
+	cmd := &exec.Cmd{Path: prog, Args: argv, Dir: spec.Dir}
+	env := spec.Env
+	if sh := shellFor(spec.Kind, spec.Argv); sh != "" {
+		env = append(append([]string(nil), env...), "SHELL="+sh)
+	}
+	cmd.Env = filterEnv(env)
 	cmd.SysProcAttr = &syscall.SysProcAttr{}
 	p := &devProc{handle: newHandle(), cmd: cmd, done: make(chan struct{}), d: d, wsID: wsID}
 	var tty *os.File
@@ -145,7 +163,7 @@ func (d *Dev) Spawn(ctx context.Context, wsID string, spec SpawnSpec) (Process, 
 		}
 		cmd.SysProcAttr.Setpgid = true
 	}
-	err := cmd.Start()
+	err = cmd.Start()
 	if tty != nil {
 		tty.Close()
 	}

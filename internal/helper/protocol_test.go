@@ -32,10 +32,58 @@ func TestProcessKinds(t *testing.T) {
 	if got := Kinds(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("kinds = %v, want %v", got, want)
 	}
-	for _, k := range []Kind{KindCodeServer, KindSSHSession} {
-		if kinds[k] {
-			t.Errorf("%s should be reserved, not implemented", k)
+	for _, k := range Kinds() {
+		if !kinds[k] {
+			t.Errorf("%s is still reserved", k)
 		}
+	}
+}
+
+// Each kind runs only the programs it exists for (kinds.go).
+func TestProgramForKinds(t *testing.T) {
+	self := "/usr/local/bin/armageddon"
+	ok := []struct {
+		kind Kind
+		argv []string
+		prog string
+	}{
+		{KindSSHSession, []string{"/bin/sh", "-l"}, "/bin/sh"},
+		{KindSSHSession, []string{"/bin/sh"}, "/bin/sh"},
+		{KindSSHSession, []string{"/bin/sh", "-c", "echo hi; id"}, "/bin/sh"},
+		{KindSSHSession, []string{SFTPServerArgv}, self},
+		{KindPTYShell, []string{"/bin/sh", "-c", "top"}, "/bin/sh"},
+		{KindCodeServer, []string{"/opt/code-server/bin/code-server", "--socket", "x"}, "/opt/code-server/bin/code-server"},
+	}
+	for _, c := range ok {
+		prog, argv, err := programFor(c.kind, c.argv, self)
+		if err != nil || prog != c.prog {
+			t.Errorf("%s %q: %q %v", c.kind, c.argv, prog, err)
+		}
+		if c.argv[0] == SFTPServerArgv && !reflect.DeepEqual(argv, []string{self, "sftp-server"}) {
+			t.Errorf("sftp argv %q", argv)
+		}
+	}
+	bad := []struct {
+		kind Kind
+		argv []string
+	}{
+		{KindSSHSession, []string{"/usr/bin/python3", "-c", "x"}},
+		{KindSSHSession, []string{"/bin/sh", "-x", "y"}},
+		{KindSSHSession, []string{"/bin/sh", "-c"}},
+		{KindSSHSession, []string{SFTPServerArgv, "--root", "/"}},
+		{KindSSHSession, []string{"/tmp/sftp-server"}},
+		{KindPTYShell, []string{"/usr/bin/python3"}},
+		{KindCodeServer, []string{"code-server"}},
+		{KindCodeServer, []string{"/opt/../tmp/code-server"}},
+		{KindGitService, []string{"/usr/bin/git"}},
+	}
+	for _, c := range bad {
+		if _, _, err := programFor(c.kind, c.argv, self); err == nil {
+			t.Errorf("%s %q accepted", c.kind, c.argv)
+		}
+	}
+	if shellFor(KindCodeServer, []string{"/opt/cs"}) == "" || shellFor(KindRuntimeCommand, []string{"/bin/sh"}) != "" {
+		t.Error("shellFor")
 	}
 }
 
