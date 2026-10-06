@@ -40,3 +40,6 @@ pre.cmd { background: var(--card); border: 1px solid var(--line); padding: 10px;
 a.button { display: inline-block; padding: 6px 14px; border-radius: 8px; background: var(--accent); color: var(--accent-fg); text-decoration: none; font-size: 14px; }
 .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
 select { font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); }
+.banner.device { border-left-color: var(--warn); }
+.banner.stale { border-left-color: var(--bad); }
+.card.readonly { border-style: dashed; }

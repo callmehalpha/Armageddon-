@@ -1,0 +1,47 @@
+# Armageddon server, two-process layout (contract §9.2): runs as the
+# unprivileged `armageddon` user and asks armageddon-helper.service for the
+# few privileged operations (§2.5). Installed by install.sh when the binary
+# has the `armageddon helper` subcommand.
+[Unit]
+Description=Armageddon server
+Documentation=https://github.com/callmehalpha/Armageddon-
+Wants=network-online.target
+After=network-online.target armageddon-helper.service
+Requires=armageddon-helper.service
+
+[Service]
+Type=simple
+User=armageddon
+Group=armageddon
+# The server must never run without the helper: name the socket (an
+# unreachable socket is then an error, not development mode) and wait for it.
+ExecStartPre=/bin/sh -c 'i=0; while [ ! -S /run/armageddon/helper.sock ]; do i=$((i+1)); [ $i -le 100 ] || exit 1; sleep 0.1; done'
+ExecStart=/usr/local/bin/armageddon server run --data /var/lib/armageddon --helper-socket /run/armageddon/helper.sock
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65536
+
+# Hardening (contract §9.2).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/armageddon -/run/armageddon
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+UMask=0077
+# Ports 80 and 443 for ACME and HTTPS, nothing else.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

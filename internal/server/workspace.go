@@ -6,17 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
-	"time"
 
+	"github.com/callmehalpha/Armageddon-/internal/helper"
 	"github.com/callmehalpha/Armageddon-/internal/ids"
 	"github.com/callmehalpha/Armageddon-/internal/store"
-	"github.com/callmehalpha/Armageddon-/internal/sysuser"
 	"github.com/callmehalpha/Armageddon-/internal/treesync/gitshadow"
 )
 
@@ -58,19 +58,41 @@ func (s *Server) pathsFor(id string) paths {
 type runtime struct {
 	id   string
 	p    paths
-	acct *sysuser.Account
-	seat *gitshadow.Shadow // server seat capture, runs as the workspace user
-	cps  *gitshadow.Shadow // checkpoints.git, server-owned (WorkTree unused)
+	acct *helper.Account // ws-<id>; every process "in" the workspace goes through it
+
+	authority *net.UnixListener // hooks → authority socket (P-14)
+	seat      *gitshadow.Shadow // server seat capture, runs as the workspace user
+	cps       *gitshadow.Shadow // checkpoints.git, server-owned (WorkTree unused)
 
 	// fence: receive-pack holds it as a reader, lease transitions as a writer (§4.2).
 	fence sync.RWMutex
-	// commitMu serialises authority commands for this workspace (§4.1).
+	// commitMu serialises checkpoint commits for this workspace (§4.1).
 	commitMu sync.Mutex
+	// leaseMu serialises lease commands (acquire, release, force, timers).
+	leaseMu sync.Mutex
+	// seatMu serialises everything that touches tree/ and the seat shadow:
+	// capture, apply as a follower, stopping dev processes.
+	seatMu sync.Mutex
+	// ops is the server seat's side of a handoff (tests replace it).
+	ops seatOps
+
+	leaseStateMu    sync.Mutex
+	handoffFailures map[int64]*LeaseError // why the handoff at an epoch ended without a transfer
+	last            transition            // the latest change of holder, for long-poll events
 
 	notifyMu sync.Mutex
-	notify   chan struct{} // closed and replaced on every committed checkpoint
+	notify   chan struct{} // closed and replaced on every committed checkpoint and lease change
 
+	ctx    context.Context
 	cancel context.CancelFunc
+}
+
+// done is closed when the runtime stops.
+func (rt *runtime) done() <-chan struct{} {
+	if rt.ctx == nil {
+		return nil
+	}
+	return rt.ctx.Done()
 }
 
 func (rt *runtime) changed() <-chan struct{} {
@@ -90,6 +112,9 @@ func (rt *runtime) stop() {
 	if rt.cancel != nil {
 		rt.cancel()
 	}
+	if rt.authority != nil {
+		rt.authority.Close()
+	}
 }
 
 func (s *Server) runtimeFor(id string) *runtime {
@@ -100,14 +125,18 @@ func (s *Server) runtimeFor(id string) *runtime {
 
 func (s *Server) newRuntime(w *store.Workspace) (*runtime, error) {
 	p := s.pathsFor(w.ID)
-	acct, err := sysuser.Ensure(w.OSUser, p.Home)
+	acct, err := s.helper.CreateWorkspaceUser(context.Background(), w.ID)
 	if err != nil {
 		return nil, err
+	}
+	if s.helper.Isolated() && acct.Name != w.OSUser {
+		return nil, fmt.Errorf("workspace user is %s, expected %s", acct.Name, w.OSUser)
 	}
 	rt := &runtime{id: w.ID, p: p, acct: acct, notify: make(chan struct{})}
 	rt.seat = &gitshadow.Shadow{GitDir: p.SeatShadow, WorkTree: p.Tree, IndexFile: p.SeatIndex,
 		Preserve: []string{".env*"}, Prepare: func(c *exec.Cmd) { acct.Prepare(c) }}
 	rt.cps = &gitshadow.Shadow{GitDir: p.Checkpoints, WorkTree: p.Root, IndexFile: filepath.Join(p.Root, "cps.index")}
+	rt.ops = &serverSeat{s: s, rt: rt}
 	return rt, nil
 }
 
@@ -131,10 +160,19 @@ func (s *Server) startWorkspaces(ctx context.Context) error {
 			// Recreate refs/checkpoints/current from the DB if a crash left it behind.
 			rt.cps.Git(nil, "update-ref", "refs/checkpoints/current", w.CurrentCheckpoint)
 		}
+		// Rewrite hooks (they carry the authority socket path) and open
+		// the socket.
+		if err := s.writeHooks(rt); err != nil {
+			log.Printf("workspace %s: hooks: %v", w.ID, err)
+		}
+		if err := s.listenAuthority(rt); err != nil {
+			log.Printf("workspace %s: authority socket: %v", w.ID, err)
+		}
 		s.mu.Lock()
 		s.rts[w.ID] = rt
 		s.mu.Unlock()
 		s.startCaptureLoop(ctx, rt)
+		s.resumeHandoff(rt)
 	}
 	return nil
 }
@@ -164,7 +202,7 @@ func (s *Server) CreateWorkspace(owner *store.User, name, sourceURL string) (*st
 	now := store.Now()
 	id := ids.New()
 	w := &store.Workspace{ID: id, OwnerID: owner.ID, Name: name, Slug: slugify(name), State: StateCreating,
-		SourceKind: "empty", SourceURL: sourceURL, OSUser: sysuser.NameFor(id), CreatedAt: now, UpdatedAt: now}
+		SourceKind: "empty", SourceURL: sourceURL, OSUser: helper.UserName(id), CreatedAt: now, UpdatedAt: now}
 	if sourceURL != "" {
 		w.SourceKind = "clone"
 	}
@@ -204,6 +242,9 @@ func (s *Server) importWorkspace(w *store.Workspace, owner *store.User) error {
 		return err
 	}
 	p, a := rt.p, rt.acct
+	// The workspace directory and its server-side entries (hooks,
+	// checkpoints.git) belong to the server; repo.git, tree, home and seat
+	// are created by the helper, owned by the workspace user.
 	if err := os.MkdirAll(p.Root, 0o755); err != nil {
 		return err
 	}
@@ -213,22 +254,13 @@ func (s *Server) importWorkspace(w *store.Workspace, owner *store.User) error {
 			return err
 		}
 	}
-	for _, d := range []string{p.Home, p.SeatDir} {
-		if err := a.MkdirOwned(d, 0o700); err != nil {
-			return err
-		}
+	if err := s.helper.PrepareWorkspaceDirs(context.Background(), w.ID); err != nil {
+		return fmt.Errorf("prepare workspace directories: %w", err)
 	}
 	// Workspace user's Git identity and a guard against inherited config.
-	gitcfg := fmt.Sprintf("[user]\n\tname = %s\n\temail = %s@armageddon.local\n[init]\n\tdefaultBranch = main\n", owner.Username, owner.Username)
-	if err := os.WriteFile(filepath.Join(p.Home, ".gitconfig"), []byte(gitcfg), 0o600); err != nil {
+	if err := s.prepareHome(rt, owner, w.Slug); err != nil {
 		return err
 	}
-	// Login shells read .bash_profile; keep the prompt short and relative
-	// to the workspace rather than the server's directory layout.
-	bashrc := fmt.Sprintf("export PS1='\\[\\e[1;36m\\]%s\\[\\e[0m\\]:\\W\\$ '\n", w.Slug)
-	os.WriteFile(filepath.Join(p.Home, ".bashrc"), []byte(bashrc), 0o600)
-	os.WriteFile(filepath.Join(p.Home, ".bash_profile"), []byte("[ -f ~/.bashrc ] && . ~/.bashrc\n"), 0o600)
-	a.Chown(filepath.Join(p.Home, ".gitconfig"), filepath.Join(p.Home, ".bashrc"), filepath.Join(p.Home, ".bash_profile"))
 
 	run := func(dir string, args ...string) error {
 		cmd := a.Command(dir, "git", args...)
@@ -238,11 +270,6 @@ func (s *Server) importWorkspace(w *store.Workspace, owner *store.User) error {
 			return fmt.Errorf("git %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 		}
 		return nil
-	}
-	// The workspace dir itself is root-owned; let the workspace user create
-	// repo.git and tree inside a directory it owns.
-	if err := a.MkdirOwned(p.Repo, 0o700); err != nil {
-		return err
 	}
 	if w.SourceKind == "clone" {
 		if err := run(p.Root, "clone", "--bare", "--quiet", "--", w.SourceURL, p.Repo); err != nil {
@@ -256,7 +283,12 @@ func (s *Server) importWorkspace(w *store.Workspace, owner *store.User) error {
 			return err
 		}
 		// An initial empty commit so HEAD, the index delta and replicas all
-		// have a commit to work against.
+		// have a commit to work against. The empty tree is written as a real
+		// object first: Git only pretends it exists, and `git fsck` reports
+		// it missing otherwise (found by doctor).
+		if err := run(p.Repo, "hash-object", "-w", "-t", "tree", "/dev/null"); err != nil {
+			return err
+		}
 		cmd := a.Command(p.Repo, "git", "commit-tree", gitshadow.EmptyTree, "-m", "Initial commit (created by Armageddon)")
 		out, err := cmd.Output()
 		if err != nil {
@@ -275,29 +307,29 @@ func (s *Server) importWorkspace(w *store.Workspace, owner *store.User) error {
 	if err != nil {
 		return fmt.Errorf("default branch: %w", err)
 	}
-	if err := a.MkdirOwned(p.Tree, 0o700); err != nil {
-		return err
-	}
-	// p.Tree exists, empty and owned by the workspace user: the user cannot
-	// create directories in the root-owned workspace directory itself.
+	// p.Tree exists (PrepareWorkspaceDirs), empty and owned by the
+	// workspace user, who cannot create directories in the server-owned
+	// workspace directory itself.
 	if err := run(p.Repo, "worktree", "add", "--quiet", p.Tree, strings.TrimSpace(string(head))); err != nil {
 		return err
 	}
 	if err := s.writeHooks(rt); err != nil {
 		return err
 	}
-	if err := gitshadow.Init(p.SeatShadow, rt.seat.Prepare); err != nil {
+	// The seat shadow belongs to the workspace user, including the info/
+	// files carrying the byte-exact capture settings.
+	if err := gitshadow.InitWith(p.SeatShadow, rt.seat.Prepare, a.WriteFile); err != nil {
 		return fmt.Errorf("seat shadow: %w", err)
 	}
-	// Init writes info/attributes and info/exclude itself; the workspace
-	// user must own them (they carry the byte-exact capture settings).
-	if err := a.Chown(p.SeatShadow); err != nil {
-		return err
-	}
+	// checkpoints.git belongs to the server and is never opened by
+	// workspace processes; objects reach it only as a pack stream (§2.5).
 	if err := gitshadow.Init(p.Checkpoints, nil); err != nil {
 		return fmt.Errorf("checkpoints repo: %w", err)
 	}
 	os.Chmod(p.Checkpoints, 0o700)
+	if err := s.listenAuthority(rt); err != nil {
+		return fmt.Errorf("authority socket: %w", err)
+	}
 	if err := s.store.SetWorkspaceState(w.ID, StateImporting, StateReady, "", store.Now()); err != nil {
 		return err
 	}
@@ -326,7 +358,7 @@ func (s *Server) writeHooks(rt *runtime) error {
 		return err
 	}
 	for _, h := range []string{"post-receive", "reference-transaction"} {
-		script := fmt.Sprintf("#!/bin/sh\nexec %q hook %s \"$@\"\n", s.hookBin, h)
+		script := fmt.Sprintf("#!/bin/sh\nARMAGEDDON_AUTHORITY_SOCK=%q exec %q hook %s \"$@\"\n", s.authoritySocket(rt.id), s.hookBin, h)
 		f := filepath.Join(rt.p.Hooks, h)
 		if err := os.WriteFile(f, []byte(script), 0o755); err != nil {
 			return err
@@ -336,139 +368,4 @@ func (s *Server) writeHooks(rt *runtime) error {
 		}
 	}
 	return nil
-}
-
-// ---- server seat capture & authority commit ----
-
-func (s *Server) startCaptureLoop(ctx context.Context, rt *runtime) {
-	cctx, cancel := context.WithCancel(ctx)
-	rt.cancel = cancel
-	interval := time.Duration(s.cfg.CaptureIntervalMS) * time.Millisecond
-	go func() {
-		t := time.NewTicker(interval)
-		defer t.Stop()
-		failures := 0
-		for {
-			select {
-			case <-cctx.Done():
-				return
-			case <-t.C:
-			}
-			if _, err := s.captureOnce(rt); err != nil {
-				failures++
-				if failures == 1 || failures%30 == 0 {
-					log.Printf("workspace %s: capture: %v", rt.id, err)
-				}
-			} else {
-				failures = 0
-			}
-		}
-	}()
-}
-
-// captureOnce captures the server seat and commits a checkpoint if the
-// working state changed. Returns the new sequence number (0 if unchanged).
-func (s *Server) captureOnce(rt *runtime) (int64, error) {
-	w, err := s.store.WorkspaceByID(rt.id)
-	if err != nil {
-		return 0, err
-	}
-	if w.State != StateReady {
-		return 0, nil
-	}
-	lease, err := s.store.LeaseOf(nil, rt.id)
-	if err != nil {
-		return 0, err
-	}
-	if lease.HolderKind != "server" {
-		return 0, nil // the server seat is a follower while a device holds the lease
-	}
-	st, err := rt.seat.CaptureState()
-	if err != nil {
-		return 0, err
-	}
-	if w.CurrentCheckpoint != "" {
-		prev, err := rt.cps.StateOf(w.CurrentCheckpoint)
-		if err == nil && prev.Same(st) {
-			return 0, nil
-		}
-	}
-	cp, err := rt.seat.CommitState(st, "refs/seat/latest", w.CurrentCheckpoint, int(w.CheckpointSeq+1))
-	if err != nil {
-		return 0, err
-	}
-	// Seat shadow (workspace user) → checkpoints.git (server) as a thin pack
-	// against current, never by sharing object directories (§2.5, P-1).
-	pack, err := rt.seat.PackSince(cp, w.CurrentCheckpoint)
-	if err != nil {
-		return 0, err
-	}
-	if err := rt.cps.ReceivePack(pack, "refs/staging/server", cp); err != nil {
-		return 0, err
-	}
-	return s.commitCheckpoint(rt, lease.Epoch, "server", "", w.CurrentCheckpoint, cp, "auto")
-}
-
-var (
-	ErrLeaseLost      = errors.New("lease_lost")
-	ErrParentMismatch = errors.New("parent_mismatch")
-)
-
-// commitCheckpoint is the authority's commit command (§6.4): epoch check,
-// parent CAS, sequence assignment, then ref update and notification.
-func (s *Server) commitCheckpoint(rt *runtime, epoch int64, authorKind, authorDevice, parent, cp, kind string) (int64, error) {
-	rt.commitMu.Lock()
-	defer rt.commitMu.Unlock()
-	meta, err := rt.cps.ReadMeta(cp)
-	if err != nil {
-		return 0, fmt.Errorf("checkpoint %s unreadable: %w", cp, err)
-	}
-	tree, err := rt.cps.Git(nil, "rev-parse", cp+":worktree")
-	if err != nil {
-		return 0, err
-	}
-	var seq int64
-	err = s.store.Tx(context.Background(), func(tx *sql.Tx) error {
-		if existing, err := s.store.CheckpointByIDTx(tx, rt.id, cp); err == nil {
-			seq = existing.Seq // idempotent retry
-			return nil
-		}
-		lease, err := s.store.LeaseOf(tx, rt.id)
-		if err != nil {
-			return err
-		}
-		if lease.Epoch != epoch || lease.HolderKind != authorKind || lease.HolderDevice != authorDevice {
-			return ErrLeaseLost
-		}
-		var cur sql.NullString
-		var curSeq int64
-		if err := tx.QueryRow(`SELECT current_checkpoint_id, checkpoint_seq FROM workspaces WHERE id = ?`, rt.id).Scan(&cur, &curSeq); err != nil {
-			return err
-		}
-		if cur.String != parent {
-			return ErrParentMismatch
-		}
-		seq = curSeq + 1
-		now := store.Now()
-		if err := s.store.InsertCheckpoint(tx, &store.Checkpoint{ID: cp, WorkspaceID: rt.id, Seq: seq, Epoch: epoch, ParentID: parent,
-			AuthorKind: authorKind, AuthorDevice: authorDevice, HeadRef: meta.HeadRef, HeadOid: meta.HeadOid,
-			WorktreeTree: strings.TrimSpace(string(tree)), Kind: kind, CreatedAt: now}); err != nil {
-			return err
-		}
-		ok, err := s.store.AdvanceCurrent(tx, rt.id, parent, cp, seq, now)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return ErrParentMismatch
-		}
-		return nil
-	})
-	if err != nil {
-		return 0, err
-	}
-	rt.cps.Git(nil, "update-ref", fmt.Sprintf("refs/checkpoints/%d", seq), cp)
-	rt.cps.Git(nil, "update-ref", "refs/checkpoints/current", cp)
-	rt.broadcast()
-	return seq, nil
 }

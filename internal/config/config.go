@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 const Version = 1
@@ -17,12 +18,49 @@ type Server struct {
 	PublicURL string `json:"public_url"` // how clients reach the server, e.g. "https://dev.example.com"
 	TLSCert   string `json:"tls_cert,omitempty"`
 	TLSKey    string `json:"tls_key,omitempty"`
+	// TLSMode is "" (plain HTTP, or TLSCert/TLSKey when set), "files"
+	// (operator-supplied certificate), "self-signed" (IP-only mode, generated
+	// by `server init --ip-only`) or "acme" (certmagic; contract §9.2).
+	TLSMode string `json:"tls_mode,omitempty"`
+	// Domain is the ACME domain name.
+	Domain    string `json:"domain,omitempty"`
+	ACMEEmail string `json:"acme_email,omitempty"`
+	// ACMECA is the ACME directory URL; empty means Let's Encrypt production.
+	ACMECA string `json:"acme_ca,omitempty"`
+	// HTTPListen serves ACME HTTP-01 challenges and redirects to HTTPS
+	// (acme mode only). Default ":80".
+	HTTPListen string `json:"http_listen,omitempty"`
 	// CaptureIntervalMS is how often the server seat is checked for changes
 	// (polling stands in for the watcher in the MVP).
 	CaptureIntervalMS int `json:"capture_interval_ms"`
+	// LeaseStaleMS is T_stale: a device holding the lease with no heartbeat
+	// for this long is shown as STALE (contract §3.2; default 2 min).
+	LeaseStaleMS int `json:"lease_stale_ms,omitempty"`
+	// HandoffTimeoutMS is T_handoff: how long a holder has to flush and
+	// release before the handoff fails (contract §3.2; default 30 s).
+	HandoffTimeoutMS int `json:"handoff_timeout_ms,omitempty"`
+	// RunDir holds the per-workspace authority sockets (P-14). Default:
+	// the directory of the helper socket (/run/armageddon), or a private
+	// temp directory without a helper.
+	RunDir string `json:"run_dir,omitempty"`
 
 	CodeServer CodeServer `json:"code_server"`
 	SSH        SSH        `json:"ssh"`
+}
+
+// TStale and THandoff return the lease timers with their defaults applied.
+func (c *Server) TStale() time.Duration {
+	if c.LeaseStaleMS > 0 {
+		return time.Duration(c.LeaseStaleMS) * time.Millisecond
+	}
+	return 2 * time.Minute
+}
+
+func (c *Server) THandoff() time.Duration {
+	if c.HandoffTimeoutMS > 0 {
+		return time.Duration(c.HandoffTimeoutMS) * time.Millisecond
+	}
+	return 30 * time.Second
 }
 
 // CodeServer configures the browser IDE (plan M4.3).

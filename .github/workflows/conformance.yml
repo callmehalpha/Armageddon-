@@ -1,0 +1,32 @@
+name: conformance
+# Protocol conformance suite with a big budget (plan M7.8): the P4 scenario
+# generator drives a real server and two agents with fault injection.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: randomized runs
+        default: "40"
+      steps:
+        description: steps per run
+        default: "120"
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: protocol conformance (big budget)
+        env:
+          CONFORMANCE_RUNS: ${{ github.event.inputs.runs || '40' }}
+          CONFORMANCE_STEPS: ${{ github.event.inputs.steps || '120' }}
+        run: go test ./test/conformance -run Conformance -v -timeout 330m

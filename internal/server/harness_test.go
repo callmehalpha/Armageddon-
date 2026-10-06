@@ -15,7 +15,6 @@ import (
 	"github.com/callmehalpha/Armageddon-/internal/identity"
 	"github.com/callmehalpha/Armageddon-/internal/ids"
 	"github.com/callmehalpha/Armageddon-/internal/store"
-	"github.com/callmehalpha/Armageddon-/internal/sysuser"
 	"github.com/callmehalpha/Armageddon-/internal/testutil/fakecodeserver"
 )
 
@@ -92,19 +91,12 @@ func newHarness(t *testing.T) *harness {
 		}
 		cancel()
 		s.mu.Lock()
-		var users []string
 		for _, rt := range s.rts {
 			rt.stop()
-			if sysuser.Isolated() {
-				users = append(users, rt.acct.Name)
-			}
 		}
 		s.mu.Unlock()
 		s.store.Close()
 		os.RemoveAll(dir)
-		for _, u := range users {
-			sysuser.Delete(u)
-		}
 	})
 	return h
 }

@@ -1,0 +1,26 @@
+# Armageddon server, single-process layout (v0.1.0-mvp binaries without
+# `armageddon helper`). install.sh installs this file as armageddon.service.
+#
+# The server runs as root because it creates the per-workspace users and
+# drops to them itself (internal/sysuser). The filesystem hardening of the
+# two-process layout cannot apply: useradd writes /etc, and workspace
+# processes inherit the unit's sandbox. Once the helper exists (Phase 2),
+# re-running install.sh switches to armageddon.service + armageddon-helper.service.
+[Unit]
+Description=Armageddon server (single process, root)
+Documentation=https://github.com/callmehalpha/Armageddon-
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/armageddon server run --data /var/lib/armageddon
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65536
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+
+[Install]
+WantedBy=multi-user.target

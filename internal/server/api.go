@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/callmehalpha/Armageddon-/internal/ids"
 	"github.com/callmehalpha/Armageddon-/internal/store"
@@ -45,6 +44,17 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/workspaces/{id}/quarantines", s.requireUser(s.member(s.handleQuarantineUpload)))
 	mux.HandleFunc("GET /api/workspaces/{id}/quarantines", s.requireUser(s.member(s.handleQuarantines)))
 	mux.HandleFunc("POST /api/workspaces/{id}/sync", s.requireUser(s.member(s.handleSyncNow)))
+	// Local write mode (M7): lease, device checkpoint upload/commit, quarantines, replicas
+	mux.HandleFunc("POST /api/workspaces/{id}/lease/acquire", s.requireUser(s.member(s.handleAcquire)))
+	mux.HandleFunc("POST /api/workspaces/{id}/lease/release", s.requireUser(s.member(s.handleRelease)))
+	mux.HandleFunc("POST /api/workspaces/{id}/lease/heartbeat", s.requireUser(s.member(s.handleHeartbeat)))
+	mux.HandleFunc("POST /api/workspaces/{id}/lease/force", s.requireUser(s.member(s.handleForce)))
+	mux.HandleFunc("POST /api/workspaces/{id}/checkpoints/pack", s.requireUser(s.member(s.handleCheckpointUpload)))
+	mux.HandleFunc("POST /api/workspaces/{id}/checkpoints/commit", s.requireUser(s.member(s.handleCommit)))
+	mux.HandleFunc("GET /api/workspaces/{id}/quarantines/{qid}/pack", s.requireUser(s.member(s.handleQuarantinePack)))
+	mux.HandleFunc("DELETE /api/workspaces/{id}/quarantines/{qid}", s.requireUser(s.member(s.handleQuarantineDrop)))
+	mux.HandleFunc("POST /api/workspaces/{id}/replica", s.requireUser(s.member(s.handleReplicaReport)))
+	mux.HandleFunc("GET /api/workspaces/{id}/replicas", s.requireUser(s.member(s.handleReplicas)))
 	mux.HandleFunc("GET /api/workspaces/{id}/terminal", s.requireUser(s.member(s.handleTerminal)))
 	// Browser IDE: every method and subpath, proxied to the workspace's
 	// code-server after the same user + membership checks.
@@ -87,13 +97,13 @@ func (s *Server) member(h wsHandler) http.HandlerFunc {
 	}
 }
 
-func (s *Server) wsJSON(w *store.Workspace, role string) map[string]any {
+func (s *Server) wsJSON(w *store.Workspace, role string, caller *store.Device) map[string]any {
 	out := map[string]any{"id": w.ID, "name": w.Name, "slug": w.Slug, "state": w.State, "state_reason": w.StateReason,
 		"source_url": w.SourceURL, "role": role, "checkpoint_seq": w.CheckpointSeq, "current_checkpoint": w.CurrentCheckpoint,
 		"git_url": s.cfg.PublicURL + "/git/" + w.ID + ".git", "created_at": w.CreatedAt,
 		"ide_path": "/api/workspaces/" + w.ID + "/ide/", "ide_running": s.ide.running(w.ID)}
 	if l, err := s.store.LeaseOf(nil, w.ID); err == nil {
-		out["lease"] = map[string]any{"holder_kind": l.HolderKind, "holder_device": l.HolderDevice, "epoch": l.Epoch}
+		out["lease"] = s.leaseJSON(l, caller)
 	}
 	return out
 }
@@ -107,7 +117,7 @@ func (s *Server) handleListWorkspaces(rw http.ResponseWriter, r *http.Request) {
 	out := []map[string]any{}
 	for _, w := range ws {
 		_, role, _ := s.store.WorkspaceForMember(w.ID, userOf(r).ID)
-		out = append(out, s.wsJSON(w, role))
+		out = append(out, s.wsJSON(w, role, deviceOf(r)))
 	}
 	writeJSON(rw, 200, out)
 }
@@ -130,11 +140,11 @@ func (s *Server) handleCreateWorkspace(rw http.ResponseWriter, r *http.Request) 
 		writeErr(rw, 400, err.Error())
 		return
 	}
-	writeJSON(rw, 201, s.wsJSON(w, "owner"))
+	writeJSON(rw, 201, s.wsJSON(w, "owner", nil))
 }
 
 func (s *Server) handleGetWorkspace(rw http.ResponseWriter, r *http.Request, w *store.Workspace, role string) {
-	writeJSON(rw, 200, s.wsJSON(w, role))
+	writeJSON(rw, 200, s.wsJSON(w, role, deviceOf(r)))
 }
 
 func (s *Server) handleCheckpoints(rw http.ResponseWriter, r *http.Request, w *store.Workspace, role string) {
@@ -198,45 +208,6 @@ func (s *Server) handleAddMember(rw http.ResponseWriter, r *http.Request, w *sto
 	writeJSON(rw, 200, map[string]bool{"ok": true})
 }
 
-// handleCurrent returns the current checkpoint and the lease (P-7). With
-// ?after=<seq>&wait=<s> it long-polls until a newer checkpoint exists.
-func (s *Server) handleCurrent(rw http.ResponseWriter, r *http.Request, w *store.Workspace, role string) {
-	after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
-	wait, _ := strconv.Atoi(r.URL.Query().Get("wait"))
-	if wait > 55 {
-		wait = 55
-	}
-	deadline := time.After(time.Duration(wait) * time.Second)
-	for {
-		cur, err := s.store.WorkspaceByID(w.ID)
-		if err != nil {
-			writeErr(rw, 404, "no such workspace")
-			return
-		}
-		if cur.CheckpointSeq > after || wait == 0 {
-			out := map[string]any{"seq": cur.CheckpointSeq, "id": cur.CurrentCheckpoint, "state": cur.State}
-			if l, err := s.store.LeaseOf(nil, w.ID); err == nil {
-				out["lease"] = map[string]any{"holder_kind": l.HolderKind, "holder_device": l.HolderDevice, "epoch": l.Epoch,
-					"you": deviceOf(r) != nil && l.HolderKind == "device" && l.HolderDevice == deviceOf(r).ID}
-			}
-			writeJSON(rw, 200, out)
-			return
-		}
-		rt := s.runtimeFor(w.ID)
-		if rt == nil {
-			writeErr(rw, 503, "workspace not running")
-			return
-		}
-		select {
-		case <-rt.changed():
-		case <-deadline:
-			wait = 0 // answer with the unchanged state
-		case <-r.Context().Done():
-			return
-		}
-	}
-}
-
 // handlePack serves checkpoint <seq> as a thin pack against ?base=<oid>
 // (P-1). If the server does not have base, it sends a full pack and says so.
 func (s *Server) handlePack(rw http.ResponseWriter, r *http.Request, w *store.Workspace, role string) {
@@ -298,6 +269,16 @@ func (s *Server) handleQuarantineUpload(rw http.ResponseWriter, r *http.Request,
 		writeErr(rw, 400, "bad checkpoint or base")
 		return
 	}
+	if q, err := s.store.QuarantineByCheckpoint(w.ID, dev.ID, cp); err == nil {
+		writeJSON(rw, 200, map[string]string{"id": q.ID}) // retry of an upload that landed
+		return
+	}
+	// Per-device quota (§6.7): refused, never evicted (Q6).
+	if n, err := s.store.OpenQuarantinesOfDevice(w.ID, dev.ID); err != nil || n >= s.quarantineQuota() {
+		writeJSON(rw, http.StatusInsufficientStorage, map[string]string{"code": "quarantine_quota",
+			"error": fmt.Sprintf("this device has %d uncleared quarantines in this workspace (quota %d). Review them with `armageddon quarantine list` and clear old ones with `armageddon quarantine drop`; nothing is evicted automatically", n, s.quarantineQuota())})
+		return
+	}
 	pack, err := io.ReadAll(http.MaxBytesReader(rw, r.Body, 2<<30))
 	if err != nil {
 		writeErr(rw, 400, "pack too large or unreadable")
@@ -323,6 +304,9 @@ func (s *Server) handleQuarantines(rw http.ResponseWriter, r *http.Request, w *s
 	if err != nil {
 		writeErr(rw, 500, err.Error())
 		return
+	}
+	if qs == nil {
+		qs = []*store.Quarantine{}
 	}
 	writeJSON(rw, 200, qs)
 }

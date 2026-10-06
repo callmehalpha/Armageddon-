@@ -5,13 +5,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
-	"os/exec"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/coder/websocket"
 	"github.com/creack/pty"
 
+	"github.com/callmehalpha/Armageddon-/internal/helper"
 	"github.com/callmehalpha/Armageddon-/internal/store"
 )
 
@@ -42,20 +43,12 @@ func (s *Server) handleTerminal(rw http.ResponseWriter, r *http.Request, w *stor
 	}
 	defer c.CloseNow()
 
-	ptmx, tty, err := pty.Open()
-	if err != nil {
-		c.Close(websocket.StatusInternalError, "pty: "+err.Error())
-		return
-	}
-	defer ptmx.Close()
-	os.Chown(tty.Name(), int(rt.acct.UID), int(rt.acct.GID))
-
+	// The helper opens the PTY (owned by ws-<id>), starts the login shell
+	// as the workspace user and passes the master back (§2.5, M4.2).
 	shell := "/bin/bash"
 	if _, err := os.Stat(shell); err != nil {
 		shell = "/bin/sh"
 	}
-	cmd := exec.Command(shell, "-l")
-	cmd.Dir = rt.p.Tree
 	// Git-provider credentials for this user, served on per-session sockets
 	// (plan M4.5); nothing is written into the workspace.
 	creds, err := s.openSeatCredentials(rt, userOf(r).ID)
@@ -64,21 +57,18 @@ func (s *Server) handleTerminal(rw http.ResponseWriter, r *http.Request, w *stor
 		return
 	}
 	defer creds.Close()
-	// SpawnInWorkspace(kind=pty-shell)
-	rt.acct.Prepare(cmd, seatEnv(rt, w, creds.GitConfig(), append(creds.Env(), "TERM=xterm-256color", "SHELL="+shell)...)...)
-	if cmd.SysProcAttr == nil {
-		cmd.SysProcAttr = &syscall.SysProcAttr{}
-	}
-	cmd.SysProcAttr.Setsid = true
-	cmd.SysProcAttr.Setctty = true
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = tty, tty, tty
-	if err := cmd.Start(); err != nil {
-		tty.Close()
+	// P-13: interactive shells get the trash hooks (and the credential
+	// helper) through the environment, not only through repo config.
+	env := append(rt.acct.BaseEnv(), seatEnv(rt, w, creds.GitConfig(), append(creds.Env(), "TERM=xterm-256color", "SHELL="+shell)...)...)
+	proc, err := s.helper.Spawn(r.Context(), w.ID, helper.SpawnSpec{Kind: helper.KindPTYShell,
+		Argv: []string{shell, "-l"}, Env: env, Dir: rt.p.Tree, Cols: 80, Rows: 24})
+	if err != nil {
 		c.Close(websocket.StatusInternalError, "shell: "+err.Error())
 		return
 	}
-	tty.Close()
-	s.event(w.ID, "user", userOf(r).ID, "terminal.started", map[string]int{"pid": cmd.Process.Pid})
+	ptmx := proc.PTY()
+	defer ptmx.Close()
+	s.event(w.ID, "user", userOf(r).ID, "terminal.started", map[string]any{"pid": proc.Pid(), "handle": proc.Handle()})
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -134,8 +124,15 @@ func (s *Server) handleTerminal(rw http.ResponseWriter, r *http.Request, w *stor
 		cancel()
 	}()
 	<-ctx.Done()
-	cmd.Process.Signal(syscall.SIGHUP)
-	cmd.Wait()
+	proc.Signal(syscall.SIGHUP)
+	waited := make(chan struct{})
+	go func() { proc.Wait(); close(waited) }()
+	select {
+	case <-waited:
+	case <-time.After(5 * time.Second):
+		proc.Signal(syscall.SIGKILL)
+		<-waited
+	}
 	reasonMu.Lock()
 	defer reasonMu.Unlock()
 	c.Close(websocket.StatusNormalClosure, closeReason)

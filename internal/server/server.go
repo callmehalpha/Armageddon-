@@ -17,16 +17,23 @@ import (
 	"time"
 
 	"github.com/callmehalpha/Armageddon-/internal/config"
+	"github.com/callmehalpha/Armageddon-/internal/helper"
 	"github.com/callmehalpha/Armageddon-/internal/ids"
 	"github.com/callmehalpha/Armageddon-/internal/secretbox"
 	"github.com/callmehalpha/Armageddon-/internal/store"
-	"github.com/callmehalpha/Armageddon-/internal/sysuser"
+	"github.com/callmehalpha/Armageddon-/internal/tlsedge"
 )
 
 type Server struct {
 	cfg     *config.Server
 	store   *store.Store
 	hookBin string // copy of this binary that workspace users can execute
+
+	// helper performs every privileged action (contract §2.5): the socket
+	// client in production, the in-process dev helper otherwise.
+	helper helper.Client
+	// runDir holds the per-workspace authority sockets (P-14).
+	runDir string
 
 	mu  sync.Mutex
 	rts map[string]*runtime // per-workspace runtime, by workspace ID
@@ -39,11 +46,29 @@ type Server struct {
 	ide  *ideManager // code-server instances (M4.3)
 	sshd *sshServer  // embedded SSH endpoint (M4.4), nil unless enabled
 
+	clock func() int64 // unix ms; tests replace it (lease timers)
+
 	ctx context.Context
 }
 
+// Option configures a Server.
+type Option func(*Server)
+
+// WithHelper sets the privileged helper client (default: the in-process
+// dev helper, no isolation).
+func WithHelper(c helper.Client) Option { return func(s *Server) { s.helper = c } }
+
+// WithRunDir sets the directory of the per-workspace authority sockets.
+func WithRunDir(dir string) Option { return func(s *Server) { s.runDir = dir } }
+
+// DefaultRunDir is where authority sockets go without a helper: a private
+// per-user directory under the system temp dir.
+func DefaultRunDir() string {
+	return filepath.Join(os.TempDir(), fmt.Sprintf("armageddon-%d", os.Getuid()))
+}
+
 // New opens the data directory and prepares the server. It does not listen.
-func New(cfg *config.Server) (*Server, error) {
+func New(cfg *config.Server, opts ...Option) (*Server, error) {
 	// Everything the server creates is private by default (the database, its
 	// WAL and backups, keys). Paths workspace users need are chmod-ed
 	// explicitly. Found by the acceptance test: without this the SQLite file
@@ -54,6 +79,21 @@ func New(cfg *config.Server) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{cfg: cfg, store: st, rts: map[string]*runtime{}}
+	for _, o := range opts {
+		o(s)
+	}
+	if s.helper == nil {
+		s.helper = helper.NewDev(cfg.DataDir)
+	}
+	if s.runDir == "" {
+		s.runDir = cfg.RunDir
+	}
+	if s.runDir == "" {
+		s.runDir = DefaultRunDir()
+	}
+	if err := os.MkdirAll(s.runDir, 0o755); err != nil {
+		return nil, fmt.Errorf("run directory: %w", err)
+	}
 	if err := s.installHookBinary(); err != nil {
 		return nil, fmt.Errorf("install hook binary: %w", err)
 	}
@@ -110,8 +150,8 @@ func (s *Server) installHookBinary() error {
 // Run serves HTTP until ctx is cancelled.
 func (s *Server) Run(ctx context.Context) error {
 	s.ctx = ctx
-	if !sysuser.Isolated() {
-		log.Printf("WARNING: not running as root: workspace processes run as the server's own user (no isolation, development mode)")
+	if !s.helper.Isolated() {
+		log.Printf("WARNING: no privileged helper: workspace processes run as the server's own user (no isolation, development mode)")
 	} else if err := checkTraversable(s.cfg.DataDir); err != nil {
 		return err
 	}
@@ -132,14 +172,18 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	srv := &http.Server{Addr: s.cfg.Listen, Handler: s.routes(), ReadHeaderTimeout: 15 * time.Second}
+	ln, err := tlsedge.Listen(ctx, s.cfg)
+	if err != nil {
+		return err
+	}
 	errc := make(chan error, 1)
 	go func() {
-		log.Printf("armageddon server listening on %s (public URL %s)", s.cfg.Listen, s.cfg.PublicURL)
-		if s.cfg.TLSCert != "" {
-			errc <- srv.ListenAndServeTLS(s.cfg.TLSCert, s.cfg.TLSKey)
-		} else {
-			errc <- srv.ListenAndServe()
+		mode := tlsedge.Mode(s.cfg)
+		if mode == "" {
+			mode = "plain HTTP"
 		}
+		log.Printf("armageddon server listening on %s, %s (public URL %s)", s.cfg.Listen, mode, s.cfg.PublicURL)
+		errc <- srv.Serve(ln)
 	}()
 	select {
 	case <-ctx.Done():
@@ -165,13 +209,16 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func (s *Server) janitor(ctx context.Context) {
-	t := time.NewTicker(time.Minute)
+	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
-	for {
+	for i := 0; ; i++ {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+		}
+		s.sweepStale()
+		if i%12 == 0 {
 			s.store.Prune(store.Now())
 		}
 	}

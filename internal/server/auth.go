@@ -456,5 +456,7 @@ func (s *Server) handleRevokeDevice(rw http.ResponseWriter, r *http.Request) {
 	}
 	s.sshd.closeDevice(id, "this device was revoked")
 	s.event("", "user", userOf(r).ID, "device.revoked", map[string]string{"device_id": id})
+	// A revoked device that holds a lease loses it at once (§3.2, F12).
+	s.revokeLeases(id, userOf(r).ID)
 	writeJSON(rw, 200, map[string]bool{"ok": true})
 }

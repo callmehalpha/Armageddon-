@@ -78,6 +78,9 @@ func (s *Server) serveGit(rw http.ResponseWriter, r *http.Request) {
 	cfg := [][2]string{
 		{"core.hooksPath", rt.p.Hooks},
 		{"receive.denyCurrentBranch", "ignore"},
+		// The writer mirrors its refs (§5.3): it may delete the branch the
+		// server worktree has checked out; the next checkpoint moves HEAD.
+		{"receive.denyDeleteCurrent", "ignore"},
 		{"receive.fsckObjects", "true"},
 		{"uploadpack.hideRefs", "refs/armageddon"},
 		{"receive.hideRefs", "refs/armageddon"},

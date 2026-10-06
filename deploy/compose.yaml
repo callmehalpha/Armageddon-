@@ -1,0 +1,35 @@
+# Armageddon with Docker Compose (contract §9.2, plan M5.7).
+#
+#   docker compose -f deploy/compose.yaml up -d --build
+#   docker compose -f deploy/compose.yaml logs armageddon | grep setup   # first-admin URL
+#
+# Data lives on the armageddon-data volume. Back it up with
+#   docker compose -f deploy/compose.yaml exec armageddon armageddon server backup --to /var/lib/armageddon/backups
+# Update by pulling or rebuilding the image; `armageddon server update` is
+# for host installs.
+#
+# Not supported: Docker-in-Docker. The host Docker socket is NOT mounted;
+# Compose operations (a later phase) will hand it to the helper only.
+name: armageddon
+services:
+  armageddon:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: armageddon:local
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+      # With TLS (ARMAGEDDON_DOMAIN or ARMAGEDDON_IP_ONLY), publish these instead:
+      # - "443:443"
+      # - "80:80"
+    environment:
+      ARMAGEDDON_PUBLIC_URL: ${ARMAGEDDON_PUBLIC_URL:-http://localhost:8080}
+      # ARMAGEDDON_DOMAIN: dev.example.com
+      # ARMAGEDDON_ACME_EMAIL: you@example.com
+      # ARMAGEDDON_IP_ONLY: 203.0.113.10
+    volumes:
+      - armageddon-data:/var/lib/armageddon
+
+volumes:
+  armageddon-data:

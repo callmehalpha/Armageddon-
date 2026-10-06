@@ -8,10 +8,13 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +22,7 @@ import (
 	"time"
 
 	"github.com/callmehalpha/Armageddon-/internal/identity"
+	"github.com/callmehalpha/Armageddon-/internal/tlsedge"
 )
 
 // Config is the device's local identity. The private key lives in a
@@ -27,6 +31,10 @@ type Config struct {
 	Server   string `json:"server"`
 	DeviceID string `json:"device_id"`
 	Name     string `json:"name"`
+	// CertFingerprint pins the server's self-signed certificate (IP-only
+	// installs), trust-on-first-use. Empty when the certificate is trusted
+	// through the system roots (ACME) or the server is plain HTTP.
+	CertFingerprint string `json:"cert_fingerprint,omitempty"`
 }
 
 func configDir() string {
@@ -106,7 +114,67 @@ func NewClient() (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{Cfg: cfg, key: key, http: &http.Client{Timeout: 90 * time.Second}}, nil
+	return &Client{Cfg: cfg, key: key, http: httpClient(cfg.Server, cfg.CertFingerprint, 90*time.Second)}, nil
+}
+
+// httpClient talks to the server, enforcing the pinned certificate if any.
+func httpClient(server, pin string, timeout time.Duration) *http.Client {
+	hc := &http.Client{Timeout: timeout}
+	if u, err := url.Parse(server); err == nil && u.Scheme == "https" {
+		hc.Transport = &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: tlsedge.ClientConfig(u.Hostname(), pin), ForceAttemptHTTP2: true}
+	}
+	return hc
+}
+
+// pinnedCertPath holds the pinned certificate (PEM) so Git can use it as
+// its trust anchor (http.sslCAInfo).
+func pinnedCertPath() string { return filepath.Join(configDir(), "server-cert.pem") }
+
+// trustServer decides how to trust an https server at login. A certificate
+// that verifies against the system roots needs no pin. Otherwise its
+// SHA-256 fingerprint is shown for comparison with the one `armageddon
+// server init` printed and pinned on first use; a later change is refused.
+func trustServer(server, want string, in io.Reader, interactive bool, out io.Writer) (string, error) {
+	u, err := url.Parse(server)
+	if err != nil || u.Scheme != "https" {
+		return "", err
+	}
+	port := u.Port()
+	if port == "" {
+		port = "443"
+	}
+	leaf, trusted, err := tlsedge.Probe(net.JoinHostPort(u.Hostname(), port), u.Hostname(), 15*time.Second)
+	if err != nil {
+		return "", fmt.Errorf("connect to %s: %w", server, err)
+	}
+	if trusted && want == "" {
+		return "", nil
+	}
+	fp := tlsedge.Fingerprint(leaf.Raw)
+	fmt.Fprintf(out, "The server presents a certificate that is not signed by a public authority.\n  SHA-256 fingerprint: %s\n"+
+		"Compare it with the fingerprint printed by `armageddon server init` (or `armageddon server fingerprint` on the server).\n", fp)
+	if want != "" {
+		if tlsedge.NormalizeFingerprint(want) != fp {
+			return "", &tlsedge.CertChangedError{Pinned: tlsedge.NormalizeFingerprint(want), Presented: fp}
+		}
+		fmt.Fprintln(out, "It matches --fingerprint; pinned.")
+	} else if old, err := LoadConfig(); err == nil && old.Server == server && old.CertFingerprint != "" && old.CertFingerprint != fp {
+		return "", &tlsedge.CertChangedError{Pinned: old.CertFingerprint, Presented: fp}
+	} else if interactive {
+		fmt.Fprint(out, "Trust this certificate? [y/N] ")
+		var ans string
+		fmt.Fscanln(in, &ans)
+		if a := strings.ToLower(strings.TrimSpace(ans)); a != "y" && a != "yes" {
+			return "", errors.New("certificate not trusted; nothing was changed")
+		}
+	} else {
+		fmt.Fprintln(out, "Pinned on first use (pass --fingerprint to check it non-interactively).")
+	}
+	if err := os.MkdirAll(configDir(), 0o700); err != nil {
+		return "", err
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw})
+	return fp, os.WriteFile(pinnedCertPath(), pemBytes, 0o600)
 }
 
 func (c *Client) url(p string) string { return strings.TrimRight(c.Cfg.Server, "/") + p }
@@ -175,6 +243,40 @@ func (c *Client) Do(method, path string, body io.Reader, out any) error {
 	return decode(resp, out)
 }
 
+// call sends a JSON request and decodes the JSON reply into out whatever
+// the status, because lease rejections (409) carry the lease state the
+// agent acts on (P-7, P-8). status is 0 when the server was not reached.
+func (c *Client) call(method, path string, in, out any) (int, error) {
+	var body io.Reader
+	if in != nil {
+		b, _ := json.Marshal(in)
+		body = bytes.NewReader(b)
+	}
+	resp, err := c.Raw(method, path, body)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, err
+	}
+	if out != nil {
+		json.Unmarshal(b, out)
+	}
+	if resp.StatusCode >= 300 {
+		var e struct {
+			Error string `json:"error"`
+		}
+		json.Unmarshal(b, &e)
+		if e.Error == "" {
+			e.Error = strings.TrimSpace(string(b))
+		}
+		return resp.StatusCode, fmt.Errorf("%s: %s", resp.Status, e.Error)
+	}
+	return resp.StatusCode, nil
+}
+
 // Raw performs an authenticated request and returns the response; the
 // caller closes the body.
 func (c *Client) Raw(method, path string, body io.Reader) (*http.Response, error) {
@@ -191,7 +293,8 @@ func (c *Client) Raw(method, path string, body io.Reader) (*http.Response, error
 }
 
 // Login pairs this machine with a server using the device-code flow.
-func Login(server, name string, out io.Writer) error {
+// fingerprint, when set, is the certificate fingerprint the user expects.
+func Login(server, name, fingerprint string, out io.Writer) error {
 	server = strings.TrimRight(server, "/")
 	if !strings.HasPrefix(server, "http://") && !strings.HasPrefix(server, "https://") {
 		server = "https://" + server
@@ -203,7 +306,13 @@ func Login(server, name string, out io.Writer) error {
 	if name == "" {
 		name, _ = os.Hostname()
 	}
-	hc := &http.Client{Timeout: 30 * time.Second}
+	fi, _ := os.Stdin.Stat()
+	interactive := fi != nil && fi.Mode()&os.ModeCharDevice != 0
+	pin, err := trustServer(server, fingerprint, os.Stdin, interactive, out)
+	if err != nil {
+		return err
+	}
+	hc := httpClient(server, pin, 30*time.Second)
 	pub := base64.StdEncoding.EncodeToString(key.Public().(ed25519.PublicKey))
 	var start struct {
 		PairingID       string `json:"pairing_id"`
@@ -229,7 +338,7 @@ func Login(server, name string, out io.Writer) error {
 		}
 		switch poll.Status {
 		case "approved":
-			cfg := &Config{Server: server, DeviceID: poll.DeviceID, Name: name}
+			cfg := &Config{Server: server, DeviceID: poll.DeviceID, Name: name, CertFingerprint: pin}
 			if err := cfg.save(); err != nil {
 				return err
 			}

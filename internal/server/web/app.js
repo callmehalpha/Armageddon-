@@ -139,19 +139,18 @@ async function workspacePage(id) {
     if (w.state === "creating" || w.state === "importing") { const t = setTimeout(route, 1500); cleanup = () => clearTimeout(t); }
     return;
   }
-  const holder = w.lease.holder_kind === "server" ? "the server seat (this browser)" : "device " + w.lease.holder_device;
-  const termBox = h("div", { id: "term" });
-  const cps = h("tbody"), evs = h("tbody");
+  // Who writes (contract §3.2, §4.3). The server seat is interactive only
+  // while it holds the lease; otherwise the page offers to take it back.
+  const serverHolds = w.lease.holder_kind === "server";
+  const leaseBox = h("div", { class: "banner" });
+  const termBox = serverHolds ? h("div", { id: "term" }) : h("div", { class: "card readonly" },
+    h("p", {}, h("strong", {}, w.lease.holder_name), " is writing this workspace, so the server seat is read-only: ",
+      "the browser terminal is closed and the server's dev processes are stopped. Its checkpoints still arrive here."));
+  const cps = h("tbody"), evs = h("tbody"), reps = h("div");
   const cloneCmd = "armageddon clone " + w.id;
   render(
     h("h1", {}, w.name, " ", h("span", { class: "pill ready" }, "ready")),
-    h("div", { class: "banner toolbar" },
-      h("span", {}, "Workspace is owned by ", h("strong", {}, holder), ` · epoch ${w.lease.epoch} · `,
-        h("span", { class: "muted" }, w.source_url || "empty workspace")),
-      w.lease.holder_kind === "server"
-        ? h("a", { class: "button", id: "open-ide", href: w.ide_path, target: "_blank", rel: "noopener",
-            title: "VS Code in the browser (code-server), running as this workspace's user" }, "Open IDE")
-        : null),
+    leaseBox,
     termBox,
     h("div", { class: "grid", style: "margin-top:14px" },
       h("div", { class: "card" }, h("h2", {}, "Checkpoints"),
@@ -159,36 +158,86 @@ async function workspacePage(id) {
         h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "#"), h("th", {}, "HEAD"), h("th", {}, "when"))), cps)),
       h("div", { class: "card" }, h("h2", {}, "Replicate to a laptop"),
         h("p", {}, "Install the CLI, then:"),
-        h("pre", { class: "cmd" }, `armageddon login ${location.origin}\n${cloneCmd}\ncd ${w.slug} && armageddon follow`),
+        h("pre", { class: "cmd" }, `armageddon login ${location.origin}\n${cloneCmd}\narmageddon agent run      # or: cd ${w.slug} && armageddon follow\narmageddon work local      # inside the replica, to write there`),
         h("p", { class: "muted" }, "The replica follows this workspace and survives on its own if this server is lost."),
+        reps,
         h("h2", {}, "Git remote"), h("pre", { class: "cmd" }, w.git_url))),
     h("div", { class: "card" }, h("h2", {}, "Activity"), h("table", {}, evs)));
 
-  const term = new Terminal({ cursorBlink: true, fontFamily: "ui-monospace, Menlo, monospace", fontSize: 13, convertEol: false });
-  const fit = new FitAddon.FitAddon();
-  term.loadAddon(fit); term.open(termBox); fit.fit();
-  const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const ws = new WebSocket(`${proto}//${location.host}/api/workspaces/${id}/terminal`);
-  ws.binaryType = "arraybuffer";
-  const send = (m) => ws.readyState === 1 && ws.send(JSON.stringify(m));
-  ws.onopen = () => { send({ t: "r", c: term.cols, r: term.rows }); term.focus(); };
-  ws.onmessage = (e) => term.write(new Uint8Array(e.data));
-  ws.onclose = (e) => term.write(`\r\n\x1b[33m[terminal closed${e.reason ? ": " + e.reason : ""}]\x1b[0m\r\n`);
-  term.onData((d) => send({ t: "i", d }));
-  const onResize = () => { fit.fit(); send({ t: "r", c: term.cols, r: term.rows }); };
-  window.addEventListener("resize", onResize);
+  function renderLease(cur) {
+    const l = cur.lease;
+    const parts = [];
+    if (l.holder_kind === "server") {
+      parts.push("Workspace is owned by ", h("strong", {}, "the server seat (this browser)"), ` · epoch ${l.epoch} · `,
+        h("span", { class: "muted" }, w.source_url || "empty workspace"));
+      leaseBox.className = "banner toolbar";
+      return leaseBox.replaceChildren(h("span", {}, ...parts),
+        h("a", { class: "button", id: "open-ide", href: w.ide_path, target: "_blank", rel: "noopener",
+          title: "VS Code in the browser (code-server), running as this workspace's user" }, "Open IDE"));
+    }
+    const stale = l.state === "stale";
+    leaseBox.className = "banner " + (stale ? "stale" : "device");
+    parts.push("Workspace is owned by ", h("strong", {}, l.holder_name), " ",
+      h("span", { class: "pill " + (stale ? "failed" : "ready") }, stale ? "STALE" : l.state),
+      ` · epoch ${l.epoch} · last heartbeat ${ago(l.heartbeat_at - l.now + Date.now())}`,
+      cur.checkpoint_at ? ` · last checkpoint ${ago(cur.checkpoint_at - l.now + Date.now())}` : "");
+    if (l.state === "handoff") parts.push(" · handing over to ", h("strong", {}, l.handoff_to_name || l.handoff_to), "…");
+    const err = h("div", { class: "err" });
+    const pw = h("input", { type: "password", placeholder: "your password", autocomplete: "current-password" });
+    const force = h("form", { class: "row", style: "display:none; margin-top:8px", onsubmit: async (e) => {
+      e.preventDefault(); err.textContent = "";
+      try { await api("POST", `/api/workspaces/${id}/lease/force`, { to: "server", password: pw.value }); route(); }
+      catch (x) { err.textContent = x.message; }
+    } }, h("span", {}, "Force takeover (", l.holder_name, "'s unsent changes go to quarantine when it returns):"), pw,
+      h("button", { type: "submit" }, "Force takeover"));
+    const take = h("button", { style: "margin-left:10px", onclick: async (e) => {
+      e.target.disabled = true; err.textContent = "Asking " + l.holder_name + " to flush and hand over…";
+      try { await api("POST", `/api/workspaces/${id}/lease/acquire`, { to: "server" }); route(); }
+      catch (x) { e.target.disabled = false; err.textContent = x.message; force.style.display = ""; }
+    } }, "Work on server");
+    if (stale) force.style.display = "";
+    leaseBox.replaceChildren(h("div", {}, ...parts, take), force, err);
+  }
+  renderLease({ lease: w.lease });
+
+  let term = null, ws = null, onResize = null;
+  if (serverHolds) {
+    term = new Terminal({ cursorBlink: true, fontFamily: "ui-monospace, Menlo, monospace", fontSize: 13, convertEol: false });
+    const fit = new FitAddon.FitAddon();
+    term.loadAddon(fit); term.open(termBox); fit.fit();
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    ws = new WebSocket(`${proto}//${location.host}/api/workspaces/${id}/terminal`);
+    ws.binaryType = "arraybuffer";
+    const send = (m) => ws.readyState === 1 && ws.send(JSON.stringify(m));
+    ws.onopen = () => { send({ t: "r", c: term.cols, r: term.rows }); term.focus(); };
+    ws.onmessage = (e) => term.write(new Uint8Array(e.data));
+    ws.onclose = (e) => term.write(`\r\n\x1b[33m[terminal closed${e.reason ? ": " + e.reason : ""}]\x1b[0m\r\n`);
+    term.onData((d) => send({ t: "i", d }));
+    onResize = () => { fit.fit(); send({ t: "r", c: term.cols, r: term.rows }); };
+    window.addEventListener("resize", onResize);
+  }
 
   async function refresh() {
-    const [c, e] = await Promise.all([api("GET", `/api/workspaces/${id}/checkpoints`), api("GET", `/api/workspaces/${id}/events`)]).catch(() => [[], []]);
+    const [c, e, cur, r] = await Promise.all([api("GET", `/api/workspaces/${id}/checkpoints`), api("GET", `/api/workspaces/${id}/events`),
+      api("GET", `/api/workspaces/${id}/current`), api("GET", `/api/workspaces/${id}/replicas`)]).catch(() => [[], [], null, []]);
+    if (cur && (cur.lease.holder_kind === "server") !== serverHolds) return route(); // the holder changed: rebuild
+    if (cur && !leaseBox.contains(document.activeElement)) renderLease(cur);
     cps.replaceChildren(...c.slice(0, 12).map(x => h("tr", {}, h("td", {}, x.seq),
       h("td", { class: "mono" }, (x.head_ref || "").replace("refs/heads/", "") + " " + (x.head_oid || "").slice(0, 8)),
       h("td", { class: "muted", title: when(x.created_at) }, ago(x.created_at)))));
     evs.replaceChildren(...(e || []).slice(0, 15).map(x => h("tr", {}, h("td", { class: "muted", title: when(x.TS) }, ago(x.TS)),
       h("td", {}, x.Type), h("td", { class: "mono muted" }, JSON.stringify(x.Payload)))));
+    reps.replaceChildren(...(r || []).map(x => h("div", { class: "muted" }, h("strong", {}, x.device_name), ` · ${x.state} · ${x.mode} · checkpoint #${x.applied_seq}`,
+      x.pending ? ` · ${x.pending} queued` : "", ` · seen ${ago(x.last_seen_at)}`)));
   }
   refresh();
   const timer = setInterval(refresh, 4000);
-  cleanup = () => { clearInterval(timer); window.removeEventListener("resize", onResize); ws.close(); term.dispose(); };
+  cleanup = () => {
+    clearInterval(timer);
+    if (onResize) window.removeEventListener("resize", onResize);
+    if (ws) ws.close();
+    if (term) term.dispose();
+  };
 }
 
 async function pairPage(code) {

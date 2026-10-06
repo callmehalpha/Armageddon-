@@ -2,7 +2,6 @@ package agent
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/callmehalpha/Armageddon-/internal/treesync/gitshadow"
 )
@@ -33,7 +31,48 @@ type replicaState struct {
 	Path        string            `json:"path"`
 	AppliedOid  string            `json:"applied_oid"`
 	AppliedSeq  int64             `json:"applied_seq"`
-	Refs        map[string]string `json:"refs"` // branch tips as last received from the server
+	Refs        map[string]string `json:"refs"` // branch tips as last synced with the server
+
+	// LocalBase, when set, is a local-only checkpoint the tree is known to
+	// equal (its content was just quarantined); the next apply starts
+	// from it instead of AppliedOid.
+	LocalBase string `json:"local_base,omitempty"`
+
+	// Everything the protocol relies on across a crash lives here or in
+	// shadow.git refs: the epoch this device believes it holds, the
+	// pending checkpoint queue and the quarantine outbox (P4: a volatile
+	// outbox loses work).
+	Mode       string            `json:"mode"`  // follow | write
+	Epoch      int64             `json:"epoch"` // > 0 while this device holds the lease
+	Pending    []pendingCP       `json:"pending,omitempty"`
+	Outbox     []outboxQ         `json:"outbox,omitempty"`
+	PushedRefs map[string]string `json:"pushed_refs,omitempty"` // heads and tags as last pushed
+
+	// Display only.
+	Status  string    `json:"status"`
+	Offline bool      `json:"offline"`
+	Lease   leaseInfo `json:"lease"`
+	Notices []notice  `json:"notices,omitempty"`
+}
+
+// pendingCP is a captured, not yet acknowledged checkpoint; parents chain.
+type pendingCP struct {
+	Oid    string `json:"oid"`
+	Parent string `json:"parent"`
+	Ref    string `json:"ref"`
+}
+
+// outboxQ is local state kept for quarantine, not yet stored on the server.
+type outboxQ struct {
+	Oid    string `json:"oid"`
+	Base   string `json:"base"`
+	Reason string `json:"reason"`
+	Ref    string `json:"ref"`
+}
+
+type notice struct {
+	At  int64  `json:"at"`
+	Msg string `json:"msg"`
 }
 
 func replicaDir(wsID string) string { return filepath.Join(dataDir(), "replicas", wsID) }
@@ -82,10 +121,34 @@ func (c *Client) Workspaces() ([]Workspace, error) {
 	return ws, c.Do("GET", "/api/workspaces", nil, &ws)
 }
 
+// leaseInfo is the lease part of every resync, heartbeat and rejection.
+type leaseInfo struct {
+	Holder        string `json:"holder"`
+	HolderKind    string `json:"holder_kind"`
+	HolderDevice  string `json:"holder_device"`
+	HolderName    string `json:"holder_name"`
+	Epoch         int64  `json:"epoch"`
+	State         string `json:"state"`
+	HandoffTo     string `json:"handoff_to"`
+	HandoffToName string `json:"handoff_to_name"`
+	HeartbeatAt   int64  `json:"heartbeat_at"`
+	Now           int64  `json:"now"`
+	StaleAfterMS  int64  `json:"stale_after_ms"`
+	You           bool   `json:"you"`
+}
+
+// current is (holder, epoch, current checkpoint), plus a rejection's code
+// and attempted epoch (P-7, P-8).
 type current struct {
-	Seq   int64  `json:"seq"`
-	ID    string `json:"id"`
-	State string `json:"state"`
+	Seq            int64     `json:"seq"`
+	ID             string    `json:"id"`
+	State          string    `json:"state"`
+	Lease          leaseInfo `json:"lease"`
+	Event          string    `json:"event"`
+	CheckpointAt   int64     `json:"checkpoint_at"`
+	Error          string    `json:"error"`
+	Code           string    `json:"code"`
+	AttemptedEpoch int64     `json:"attempted_epoch"`
 }
 
 func (c *Client) current(wsID string, after int64, wait int) (*current, error) {
@@ -120,10 +183,19 @@ func (c *Client) fetchCheckpoint(sh *gitshadow.Shadow, wsID string, seq int64, b
 // git runs git in dir with the Armageddon credential helper configured.
 func (c *Client) git(dir string, args ...string) (string, error) {
 	self, _ := os.Executable()
-	full := append([]string{"-c", "credential.helper=", "-c", "credential.helper=!" + shellQuote(self) + " git-credential"}, args...)
+	full := []string{"-c", "credential.helper=", "-c", "credential.helper=!" + shellQuote(self) + " git-credential"}
+	if c.Cfg.CertFingerprint != "" {
+		// The pinned self-signed certificate is Git's only trust anchor.
+		full = append(full, "-c", "http.sslCAInfo="+pinnedCertPath())
+	}
+	full = append(full, args...)
 	cmd := exec.Command("git", full...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if c.Cfg.CertFingerprint != "" {
+		// GIT_SSL_CAINFO in the environment would override the -c above.
+		cmd.Env = append(cmd.Env, "GIT_SSL_CAINFO="+pinnedCertPath())
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -177,6 +249,12 @@ func (c *Client) Clone(ref, dir string, out io.Writer) error {
 	if _, err := c.git(abs, "config", "credential."+strings.TrimSuffix(w.GitURL, "/")+".helper", "!"+shellQuote(self)+" git-credential"); err != nil {
 		return err
 	}
+	if c.Cfg.CertFingerprint != "" {
+		// Plain `git fetch` in the replica trusts the pinned certificate too.
+		if _, err := c.git(abs, "config", "http."+strings.TrimSuffix(w.GitURL, "/")+".sslCAInfo", pinnedCertPath()); err != nil {
+			return err
+		}
+	}
 	lk, err := lockReplica(w.ID)
 	if err != nil {
 		return err
@@ -190,7 +268,7 @@ func (c *Client) Clone(ref, dir string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	st := &replicaState{WorkspaceID: w.ID, Path: abs, Refs: map[string]string{}}
+	st := &replicaState{WorkspaceID: w.ID, Path: abs, Refs: map[string]string{}, Mode: "follow", Status: "FOLLOWING"}
 	if cur.Seq > 0 {
 		cp, err := c.fetchCheckpoint(sh, w.ID, cur.Seq, "")
 		if err != nil {
@@ -211,7 +289,7 @@ func (c *Client) Clone(ref, dir string, out io.Writer) error {
 	if err := st.save(); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "Replica ready at checkpoint #%d, including uncommitted work.\nRun `armageddon follow` inside it to keep it current.\n", st.AppliedSeq)
+	fmt.Fprintf(out, "Replica ready at checkpoint #%d, including uncommitted work.\nIt stays current while `armageddon agent run` (or `armageddon follow` in it) runs.\n", st.AppliedSeq)
 	return nil
 }
 
@@ -255,156 +333,4 @@ func FindReplica(dir string) (string, error) {
 		}
 	}
 	return "", errors.New("not inside an Armageddon replica (use `armageddon clone` first)")
-}
-
-// Follow keeps the replica current until ctx ends (§3.3 FOLLOWING).
-func (c *Client) Follow(ctx context.Context, wsID string, out io.Writer) error {
-	lk, err := lockReplica(wsID)
-	if err != nil {
-		return err
-	}
-	defer lk.release()
-	st, err := loadState(wsID)
-	if err != nil {
-		return err
-	}
-	sh := shadowFor(wsID, st.Path)
-	fmt.Fprintf(out, "Following %s at checkpoint #%d (Ctrl-C to stop)\n", st.Path, st.AppliedSeq)
-	backoff := time.Second
-	for ctx.Err() == nil {
-		cur, err := c.current(wsID, st.AppliedSeq, 50)
-		if err != nil {
-			fmt.Fprintf(out, "%s server unreachable (%v); retrying in %s\n", ts(), err, backoff)
-			sleep(ctx, backoff)
-			if backoff < time.Minute {
-				backoff *= 2
-			}
-			continue
-		}
-		backoff = time.Second
-		if cur.Seq <= st.AppliedSeq {
-			continue
-		}
-		if err := c.applyOne(sh, st, cur.Seq, out); err != nil {
-			fmt.Fprintf(out, "%s apply failed: %v\n", ts(), err)
-			sleep(ctx, 5*time.Second)
-		}
-	}
-	return nil
-}
-
-func ts() string { return time.Now().Format("15:04:05") }
-
-func sleep(ctx context.Context, d time.Duration) {
-	select {
-	case <-ctx.Done():
-	case <-time.After(d):
-	}
-}
-
-// applyOne moves the replica to checkpoint seq. Local state that never
-// reached the server is quarantined before it is overwritten (I4).
-func (c *Client) applyOne(sh *gitshadow.Shadow, st *replicaState, seq int64, out io.Writer) error {
-	cp, err := c.fetchCheckpoint(sh, st.WorkspaceID, seq, st.AppliedOid)
-	if err != nil {
-		return err
-	}
-	// History first. Local commits on a read-only replica are kept under
-	// refs/armageddon/quarantine/ before branches are overwritten (§5.5).
-	if local, err := localBranches(st.Path); err == nil {
-		for ref, oid := range local {
-			if prev, ok := st.Refs[ref]; ok && prev != oid {
-				q := fmt.Sprintf("refs/armageddon/quarantine/%d/%s", time.Now().Unix(), strings.TrimPrefix(ref, "refs/"))
-				c.git(st.Path, "update-ref", q, oid)
-				fmt.Fprintf(out, "%s local commits on %s kept as %s\n", ts(), ref, q)
-			}
-		}
-	}
-	if _, err := c.git(st.Path, "fetch", "-q", "--prune", "--update-head-ok", "armageddon", "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"); err != nil {
-		return err
-	}
-	if err := c.pointHead(sh, cp); err != nil {
-		return err
-	}
-	err = sh.Apply(st.AppliedOid, cp, gitshadow.ApplyOptions{})
-	if errors.Is(err, gitshadow.ErrDiverged) || (err != nil && strings.Contains(err.Error(), "diverged")) {
-		qid, qerr := c.quarantine(sh, st, "follower dirty")
-		if qerr != nil {
-			return fmt.Errorf("local edits found but quarantine upload failed (%v); not overwriting them", qerr)
-		}
-		fmt.Fprintf(out, "%s local edits on this read-only replica were saved to the server as quarantine %s\n", ts(), qid)
-		err = sh.Seed(cp)
-	}
-	if err != nil {
-		return err
-	}
-	st.AppliedOid, st.AppliedSeq = cp, seq
-	st.Refs, _ = localBranches(st.Path)
-	if err := st.save(); err != nil {
-		return err
-	}
-	fmt.Fprintf(out, "%s applied checkpoint #%d\n", ts(), seq)
-	return nil
-}
-
-// quarantine captures the replica's local state and uploads it (I4).
-func (c *Client) quarantine(sh *gitshadow.Shadow, st *replicaState, reason string) (string, error) {
-	state, err := sh.CaptureState()
-	if err != nil {
-		return "", err
-	}
-	ref := fmt.Sprintf("refs/armageddon/quarantine/%d", time.Now().UnixNano())
-	cp, err := sh.CommitState(state, ref, st.AppliedOid, 0)
-	if err != nil {
-		return "", err
-	}
-	pack, err := sh.PackSince(cp, st.AppliedOid)
-	if err != nil {
-		return "", err
-	}
-	q := url.Values{"checkpoint": {cp}, "base": {st.AppliedOid}, "reason": {reason}}
-	var res struct {
-		ID string `json:"id"`
-	}
-	if err := c.Do("POST", "/api/workspaces/"+st.WorkspaceID+"/quarantines?"+q.Encode(), bytes.NewReader(pack), &res); err != nil {
-		return "", err
-	}
-	return res.ID, nil
-}
-
-// Status reports replica health.
-func (c *Client) Status(wsID string, out io.Writer) error {
-	st, err := loadState(wsID)
-	if err != nil {
-		return err
-	}
-	sh := shadowFor(wsID, st.Path)
-	fmt.Fprintf(out, "replica:     %s\nworkspace:   %s\napplied:     checkpoint #%d (%.12s)\n", st.Path, wsID, st.AppliedSeq, st.AppliedOid)
-	if cur, err := c.current(wsID, 0, 0); err == nil {
-		lag := "up to date"
-		if cur.Seq > st.AppliedSeq {
-			lag = fmt.Sprintf("%d checkpoint(s) behind — run `armageddon follow`", cur.Seq-st.AppliedSeq)
-		}
-		fmt.Fprintf(out, "server:      checkpoint #%d (%s)\n", cur.Seq, lag)
-	} else {
-		fmt.Fprintf(out, "server:      unreachable (%v)\n", err)
-	}
-	lk, err := lockReplica(wsID)
-	if errors.Is(err, errBusy) {
-		fmt.Fprintln(out, "local:       a follower is running (dirty check skipped)")
-		return nil
-	} else if err != nil {
-		return err
-	}
-	defer lk.release()
-	if st.AppliedOid != "" {
-		state, err := sh.CaptureState()
-		prev, err2 := sh.StateOf(st.AppliedOid)
-		if err == nil && err2 == nil && !state.Same(prev) {
-			fmt.Fprintln(out, "local:       DIRTY — this replica is read-only; local edits will be quarantined at the next checkpoint")
-		} else if err == nil {
-			fmt.Fprintln(out, "local:       clean")
-		}
-	}
-	return nil
 }

@@ -1,0 +1,55 @@
+name: release
+# Tag v* → build linux/darwin × amd64/arm64, write manifest.json (sha256,
+# min_upgrade_from, schema_version, pinned code-server), sign it with the
+# minisign key from the MINISIGN_SECRET_KEY secret (skipped with a warning
+# when the secret is absent; decision D1), and publish a GitHub Release.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: test
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test -short ./...
+      - name: pin code-server
+        run: python3 deploy/pin-code-server.py deploy/code-server.json "$RUNNER_TEMP/code-server.json"
+      - name: build, sign and bundle
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+          CODE_SERVER_JSON: ${{ runner.temp }}/code-server.json
+        run: |
+          if [ -z "$MINISIGN_SECRET_KEY" ]; then
+            echo "::warning::MINISIGN_SECRET_KEY is not configured: this release is UNSIGNED and install.sh will refuse it without --allow-unsigned"
+          fi
+          deploy/make-release.sh "$GITHUB_REF_NAME" "$GITHUB_SHA" dist
+      - name: smoke-test the bundle
+        run: |
+          sudo apt-get install -y -qq shellcheck >/dev/null
+          shellcheck --shell=sh dist/install.sh
+          tar -tf "dist/armageddon-${GITHUB_REF_NAME#v}-linux-amd64.tar"
+          dist/armageddon-linux-amd64 version
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=""
+          case "$GITHUB_REF_NAME" in *-*) flags="--prerelease" ;; esac
+          notes="Install: curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/install.sh | sudo sh"
+          if [ ! -f dist/manifest.json.minisig ]; then notes="$notes
+
+          UNSIGNED release (no release signing key configured yet)."; fi
+          # shellcheck disable=SC2086
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "Armageddon $GITHUB_REF_NAME" --notes "$notes" $flags
