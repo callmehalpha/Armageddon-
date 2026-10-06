@@ -71,7 +71,12 @@ func TestFramesCarryDescriptors(t *testing.T) {
 }
 
 func devWorkspace(t *testing.T) (*Dev, *Account, string) {
-	data := t.TempDir()
+	// Resolve symlinks: on macOS the temp dir is under /var, a link to
+	// /private/var, and pwd in the spawned shells reports the real path.
+	data, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	d := NewDev(data)
 	root := filepath.Join(data, "workspaces", ws)
 	if err := os.MkdirAll(root, 0o755); err != nil {
