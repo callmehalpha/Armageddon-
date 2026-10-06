@@ -35,7 +35,13 @@ export ARMAGEDDON_CONFIG_DIR=$LAPTOP/config ARMAGEDDON_DATA_DIR=$LAPTOP/data
 ADMIN_PW=$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')
 
 pass() { printf '\033[32mPASS\033[0m %s\n' "$*"; }
-fail() { printf '\033[31mFAIL\033[0m %s\n' "$*"; exit 1; }
+fail() {
+  printf '\033[31mFAIL\033[0m %s\n' "$*"
+  for f in helper.log server.log hold.out; do
+    [ -f "$ROOT/$f" ] && { echo "--- $f (tail)"; tail -20 "$ROOT/$f"; }
+  done
+  exit 1
+}
 check() { local d=$1; shift; if "$@"; then pass "$d"; else fail "$d"; fi; }
 refused() { local d=$1; shift; if "$@" >/dev/null 2>&1; then fail "$d"; else pass "$d"; fi; }
 step() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
