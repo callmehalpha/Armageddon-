@@ -129,7 +129,7 @@ func TestIDEProxy(t *testing.T) {
 	if env.UID != int(rt.acct.UID) || env.Home != rt.p.Home || !strings.HasPrefix(env.UserDataDir, rt.p.Home+"/") || !strings.HasPrefix(env.ExtensionDir, rt.p.Home+"/") {
 		t.Fatalf("code-server env: %+v (want uid %d, home %s)", env, rt.acct.UID, rt.p.Home)
 	}
-	if fi, err := os.Stat(filepath.Join(rt.p.Run, "ide.sock")); err != nil || fi.Mode().Perm()&0o077 != 0 {
+	if fi, err := os.Stat(filepath.Join(rt.p.Run, "ide.sock")); err != nil || fi.Mode().Perm()&0o007 != 0 {
 		t.Fatalf("socket: %v %v", fi, err)
 	}
 

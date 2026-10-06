@@ -19,11 +19,13 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 
+	"github.com/callmehalpha/Armageddon-/internal/helper"
 	"github.com/callmehalpha/Armageddon-/internal/ids"
 	"github.com/callmehalpha/Armageddon-/internal/store"
 )
@@ -223,16 +225,26 @@ func (s *Server) rotateDataKey() (int, error) {
 type seatCredentials struct {
 	s                   *Server
 	wsID, userID        string
+	uid                 uint32 // the workspace user, the only peer served
 	credPath, agentPath string
 	lns                 []net.Listener
 	once                sync.Once
 }
 
-// openSeatCredentials creates the per-session sockets in the workspace's
-// run directory (owned by and private to the workspace user) for a user who
-// has stored credentials.
+// openSeatCredentials creates the per-session sockets for a user who has
+// stored credentials. The server listens and workspace processes connect,
+// and the server cannot give a socket to the workspace user, so the
+// sockets are made safe without chown:
+//
+//   - they live in <run>/seat/, a server-owned directory of mode 0711
+//     (nobody else can create, remove or list entries), under a random
+//     name only the session's environment carries;
+//   - the socket file is 0666, so the workspace user can connect;
+//   - every accepted connection is checked with SO_PEERCRED and served
+//     only if the peer is the workspace's uid. Anything else is logged,
+//     recorded as an event and dropped before a byte is read.
 func (s *Server) openSeatCredentials(rt *runtime, userID string) (*seatCredentials, error) {
-	sc := &seatCredentials{s: s, wsID: rt.id, userID: userID}
+	sc := &seatCredentials{s: s, wsID: rt.id, userID: userID, uid: rt.acct.UID}
 	cs, err := s.store.CredentialsOfUser(userID)
 	if err != nil || len(cs) == 0 {
 		return sc, err
@@ -242,48 +254,52 @@ func (s *Server) openSeatCredentials(rt *runtime, userID string) (*seatCredentia
 		https = https || c.Kind == credHTTPS
 		sshKeys = sshKeys || c.Kind == credSSH
 	}
-	if err := s.ensureRunDir(rt); err != nil {
+	dir, err := s.seatSocketDir()
+	if err != nil {
 		return nil, err
 	}
-	tag := ids.Secret(5)
 	listen := func(path string, serve func(net.Conn)) error {
 		if len(path) > 100 {
 			return fmt.Errorf("socket path too long (%d bytes): %s", len(path), path)
 		}
-		os.Remove(path)
-		ln, err := net.Listen("unix", path)
+		ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 		if err != nil {
 			return err
 		}
+		ln.SetUnlinkOnClose(true)
 		sc.lns = append(sc.lns, ln)
-		// Only the workspace user may connect: 0600 and owned by it, inside
-		// a 0700 directory it owns.
-		if err := os.Chmod(path, 0o600); err != nil {
-			return err
-		}
-		if err := rt.acct.Chown(path); err != nil {
+		if err := os.Chmod(path, 0o666); err != nil {
 			return err
 		}
 		go func() {
 			for {
-				c, err := ln.Accept()
+				c, err := ln.AcceptUnix()
 				if err != nil {
+					var ne net.Error
+					if errors.As(err, &ne) && ne.Timeout() {
+						continue
+					}
 					return
+				}
+				if !sc.peerAllowed(c, filepath.Base(path)) {
+					c.Close()
+					continue
 				}
 				go serve(c)
 			}
 		}()
 		return nil
 	}
+	tag := ids.Secret(16)
 	if https {
-		sc.credPath = filepath.Join(rt.p.Run, "c-"+tag+".sock")
+		sc.credPath = filepath.Join(dir, "c-"+tag+".sock")
 		if err := listen(sc.credPath, sc.serveCredential); err != nil {
 			sc.Close()
 			return nil, err
 		}
 	}
 	if sshKeys {
-		sc.agentPath = filepath.Join(rt.p.Run, "a-"+tag+".sock")
+		sc.agentPath = filepath.Join(dir, "a-"+tag+".sock")
 		if err := listen(sc.agentPath, func(c net.Conn) {
 			defer c.Close()
 			agent.ServeAgent(&seatAgent{sc: sc}, c)
@@ -293,6 +309,40 @@ func (s *Server) openSeatCredentials(rt *runtime, userID string) (*seatCredentia
 		}
 	}
 	return sc, nil
+}
+
+// seatSocketDir is the server-owned directory of the per-session credential
+// sockets: <run>/seat, mode 0711.
+func (s *Server) seatSocketDir() (string, error) {
+	dir := filepath.Join(s.runDir, "seat")
+	if err := os.Mkdir(dir, 0o711); err != nil && !os.IsExist(err) {
+		return "", err
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return "", err
+	}
+	if !fi.IsDir() || !ownedByMe(fi) {
+		return "", fmt.Errorf("%s is not a directory owned by the server user: refusing to put credential sockets there", dir)
+	}
+	if fi.Mode().Perm() != 0o711 {
+		if err := os.Chmod(dir, 0o711); err != nil {
+			return "", err
+		}
+	}
+	return dir, nil
+}
+
+// peerAllowed is the mandatory SO_PEERCRED check of a credential socket:
+// only the workspace's uid is served.
+func (sc *seatCredentials) peerAllowed(c *net.UnixConn, name string) bool {
+	uid, err := helper.PeerUID(c)
+	if err == nil && uid == sc.uid {
+		return true
+	}
+	log.Printf("workspace %s: credential socket %s refused a connection from uid %d (%v); only uid %d is served", sc.wsID, name, uid, err, sc.uid)
+	sc.s.event(sc.wsID, "server", "", "credential.refused", map[string]any{"peer_uid": uid})
+	return false
 }
 
 // GitConfig is the Git configuration a session gets: the helper list is
@@ -326,12 +376,7 @@ func (sc *seatCredentials) Close() {
 	}
 	sc.once.Do(func() {
 		for _, ln := range sc.lns {
-			ln.Close()
-		}
-		for _, p := range []string{sc.credPath, sc.agentPath} {
-			if p != "" {
-				os.Remove(p)
-			}
+			ln.Close() // unlinks the socket
 		}
 	})
 }
@@ -497,4 +542,10 @@ func SeatCredentialHelper(op string, in io.Reader, out io.Writer) error {
 // shellQuote quotes s for /bin/sh.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// ownedByMe reports whether fi belongs to the server's own uid.
+func ownedByMe(fi os.FileInfo) bool {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	return ok && int(st.Uid) == os.Getuid()
 }

@@ -221,10 +221,27 @@ func TestSeatSSHAgent(t *testing.T) {
 			sock = v
 		}
 	}
+	// Safe without chown: a random name in a server-owned 0711 directory,
+	// a connectable 0666 socket, and SO_PEERCRED on every connection.
 	fi, err := os.Stat(sock)
-	if err != nil || fi.Mode().Perm() != 0o600 {
+	if err != nil || fi.Mode().Perm() != 0o666 || filepath.Dir(sock) != filepath.Join(h.s.runDir, "seat") {
 		t.Fatalf("agent socket %q: %v %v", sock, fi, err)
 	}
+	if di, err := os.Stat(filepath.Dir(sock)); err != nil || di.Mode().Perm() != 0o711 || !ownedByMe(di) {
+		t.Fatalf("socket directory: %v %v", di, err)
+	}
+	if strings.HasPrefix(sock, rt.p.Root+"/") {
+		t.Fatalf("credential socket inside the workspace: %s", sock)
+	}
+	// A peer that is not the workspace user is dropped unserved.
+	creds.uid = rt.acct.UID + 1
+	if conn, err := net.Dial("unix", sock); err == nil {
+		if keys, err := agent.NewClient(conn).List(); err == nil {
+			t.Fatalf("agent served a foreign uid: %v", keys)
+		}
+		conn.Close()
+	}
+	creds.uid = rt.acct.UID
 	conn, err := net.Dial("unix", sock)
 	if err != nil {
 		t.Fatal(err)

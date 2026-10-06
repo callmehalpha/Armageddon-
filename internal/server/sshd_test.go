@@ -247,7 +247,7 @@ func TestSSHForwardingAndSFTP(t *testing.T) {
 	if st := fi.Sys().(*syscall.Stat_t); st.Uid != rt.acct.UID {
 		t.Fatalf("sftp file owned by uid %d, want %d", st.Uid, rt.acct.UID)
 	}
-	if os.Geteuid() == 0 {
+	if rt.acct.Isolated() {
 		// The server's own files are out of reach.
 		if _, err := sc.Open(filepath.Join(f.h.s.cfg.DataDir, "armageddon.db")); err == nil {
 			t.Fatal("sftp opened the server database")

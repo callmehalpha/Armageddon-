@@ -13,7 +13,6 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -22,12 +21,18 @@ import (
 	"time"
 
 	"github.com/callmehalpha/Armageddon-/internal/components"
+	"github.com/callmehalpha/Armageddon-/internal/helper"
 	"github.com/callmehalpha/Armageddon-/internal/store"
 )
 
 // Browser IDE (contract §2.3, plan M4.3): one code-server per workspace,
-// running as the workspace user, listening on a unix socket in the
-// workspace's private run directory with --auth none. The only way to reach
+// started by the helper (SpawnInWorkspace, kind code-server) as the
+// workspace user, listening on a unix socket in the workspace's run/
+// directory with --auth none. run/ is owned by the workspace user with the
+// server's group (mode 2750, created by PrepareWorkspaceDirs) and the socket
+// is 0660, so the server can connect and other workspace users cannot even
+// reach the name; every connection still checks with SO_PEERCRED that the
+// listener is the supervised process. The only way to reach
 // it is the authenticated proxy below: browser session, workspace
 // membership, the server holding the lease, same-origin WebSockets.
 //
@@ -74,7 +79,8 @@ type ideInstance struct {
 
 	mu         sync.Mutex
 	pid        int
-	ready      chan struct{} // closed once the current process serves (or failed to)
+	proc       helper.Process // the current code-server, nil between runs
+	ready      chan struct{}  // closed once the current process serves (or failed to)
 	readyErr   error
 	failed     error
 	failedAt   time.Time
@@ -162,34 +168,58 @@ func (m *ideManager) start(rt *runtime, w *store.Workspace, userID string) (*ide
 	// Every running instance is an interactive server-seat session: a lease
 	// handoff closes it (contract §4.3).
 	inst.unregister = m.s.sessions.Register(w.ID, SessionCodeServer, userID, inst.stop)
-	cmd := func() *exec.Cmd {
-		// SpawnInWorkspace(kind=code-server)
-		c := exec.Command(exe, "--socket", sock, "--socket-mode", "600", "--auth", "none",
-			"--user-data-dir", userData, "--extensions-dir", filepath.Join(userData, "extensions"),
-			"--disable-telemetry", "--disable-update-check", "--disable-workspace-trust",
-			// code-server's own /proxy/<port> would serve arbitrary local
-			// apps on the Armageddon origin; ports go through SSH instead.
-			"--disable-proxy",
-			rt.p.Tree)
-		c.Dir = rt.p.Tree
-		c.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // own process group, killed as one
-		rt.acct.Prepare(c, seatEnv(rt, w, nil, "SHELL=/bin/bash")...)
-		c.Stdout, c.Stderr = &inst.output, &inst.output
-		return c
+	argv := []string{exe, "--socket", sock, "--socket-mode", "660", "--auth", "none",
+		"--user-data-dir", userData, "--extensions-dir", filepath.Join(userData, "extensions"),
+		"--disable-telemetry", "--disable-update-check", "--disable-workspace-trust",
+		// code-server's own /proxy/<port> would serve arbitrary local
+		// apps on the Armageddon origin; ports go through SSH instead.
+		"--disable-proxy",
+		rt.p.Tree}
+	env := append(rt.acct.BaseEnv(), seatEnv(rt, w, nil)...)
+	spawn := func() (helper.Process, error) {
+		// A stale socket from an earlier run: only the workspace user can
+		// remove it (the server may not write in run/).
+		rm := rt.acct.Command(rt.p.Tree, "rm", "-f", "--", sock)
+		if out, err := rm.CombinedOutput(); err != nil {
+			return nil, fmt.Errorf("remove the old code-server socket: %v: %s", err, strings.TrimSpace(string(out)))
+		}
+		pr, pw, err := os.Pipe()
+		if err != nil {
+			return nil, err
+		}
+		// SpawnInWorkspace(kind=code-server): the helper checks that exe is
+		// the configured code-server and that no workspace can replace it.
+		proc, err := m.s.helper.Spawn(context.Background(), w.ID, helper.SpawnSpec{Kind: helper.KindCodeServer,
+			Argv: argv, Env: env, Dir: rt.p.Tree, Stdout: pw, Stderr: pw})
+		pw.Close()
+		if err != nil {
+			pr.Close()
+			return nil, err
+		}
+		go func() { io.Copy(&inst.output, pr); pr.Close() }()
+		return proc, nil
 	}
-	go inst.supervise(cmd, userID)
+	go inst.supervise(spawn, userID)
 	return inst, nil
 }
 
+// ensureRunDir makes sure run/ exists with the layout above. Workspaces
+// created before Phase 5 have none; the helper creates it (the server
+// cannot: the directory belongs to the workspace user).
 func (s *Server) ensureRunDir(rt *runtime) error {
-	if fi, err := os.Stat(rt.p.Run); err == nil && fi.IsDir() {
-		return nil
+	if fi, err := os.Stat(rt.p.Run); err == nil && fi.IsDir() && fi.Mode()&os.ModeSymlink == 0 {
+		st, ok := fi.Sys().(*syscall.Stat_t)
+		if !rt.acct.Isolated() || ok && st.Uid == rt.acct.UID && fi.Mode()&os.ModeSetgid != 0 && fi.Mode().Perm() == 0o750 {
+			return nil
+		}
 	}
-	return rt.acct.MkdirOwned(rt.p.Run, 0o700)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.helper.PrepareWorkspaceDirs(ctx, rt.id)
 }
 
 // supervise runs code-server, restarting it after crashes within limits.
-func (inst *ideInstance) supervise(newCmd func() *exec.Cmd, userID string) {
+func (inst *ideInstance) supervise(spawn func() (helper.Process, error), userID string) {
 	defer close(inst.done)
 	var crashes []time.Time
 	for {
@@ -201,33 +231,48 @@ func (inst *ideInstance) supervise(newCmd func() *exec.Cmd, userID string) {
 		ready := inst.ready
 		inst.mu.Unlock()
 
-		os.Remove(inst.sock)
-		cmd := newCmd()
-		if err := cmd.Start(); err != nil {
+		proc, err := spawn()
+		if err != nil {
+			inst.mu.Lock()
+			inst.readyErr = err
+			close(ready)
+			inst.mu.Unlock()
 			inst.fail(fmt.Errorf("start code-server: %w", err))
 			return
 		}
 		inst.mu.Lock()
-		inst.pid = cmd.Process.Pid
+		inst.pid, inst.proc = proc.Pid(), proc
+		stopping := inst.stopping
 		inst.mu.Unlock()
+		if stopping { // stop raced with the start: it saw no process to signal
+			proc.Signal(syscall.SIGKILL)
+		}
 		exited := make(chan struct{})
 		var waitErr error
-		go func() { waitErr = cmd.Wait(); close(exited) }()
+		go func() {
+			st, err := proc.Wait()
+			if err == nil {
+				err = fmt.Errorf("exit status %d", st.ShellCode())
+			}
+			waitErr = err
+			close(exited)
+		}()
 
-		err := inst.waitSocket(exited)
+		err = inst.waitSocket(exited)
 		inst.mu.Lock()
 		inst.readyErr = err
 		close(ready)
 		inst.mu.Unlock()
 		if err == nil {
-			inst.m.s.event(inst.wsID, "user", userID, "ide.started", map[string]int{"pid": cmd.Process.Pid})
+			inst.m.s.event(inst.wsID, "user", userID, "ide.started", map[string]any{"pid": proc.Pid(), "handle": proc.Handle()})
 		} else {
-			syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			proc.Signal(syscall.SIGKILL)
 		}
 		<-exited
 
 		inst.mu.Lock()
-		stopping := inst.stopping
+		inst.proc = nil
+		stopping = inst.stopping
 		inst.mu.Unlock()
 		if stopping {
 			return
@@ -378,7 +423,7 @@ func (inst *ideInstance) shutdown(reason string, wait bool) bool {
 		return false
 	}
 	inst.stopping = true
-	pid := inst.pid
+	proc := inst.proc
 	var conns []*wsBridge
 	for c := range inst.conns {
 		conns = append(conns, c)
@@ -389,21 +434,22 @@ func (inst *ideInstance) shutdown(reason string, wait bool) bool {
 		c.closeWithReason(reason)
 	}
 	inst.unregister()
-	if pid > 0 && !wait {
-		syscall.Kill(-pid, syscall.SIGKILL)
-	} else if pid > 0 {
-		syscall.Kill(-pid, syscall.SIGTERM)
+	// The process group is signalled through the helper: the server has
+	// no kill capability over workspace processes (§2.5).
+	if proc != nil && !wait {
+		proc.Signal(syscall.SIGKILL)
+	} else if proc != nil {
+		proc.Signal(syscall.SIGTERM)
 		select {
 		case <-inst.done:
 		case <-time.After(ideStopGrace):
-			syscall.Kill(-pid, syscall.SIGKILL)
+			proc.Signal(syscall.SIGKILL)
 			select {
 			case <-inst.done:
 			case <-time.After(2 * time.Second):
 			}
 		}
 	}
-	os.Remove(inst.sock)
 	return true
 }
 

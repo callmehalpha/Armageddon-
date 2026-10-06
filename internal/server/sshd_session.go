@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +16,8 @@ import (
 	"github.com/creack/pty"
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
+
+	"github.com/callmehalpha/Armageddon-/internal/helper"
 )
 
 // sessState is what a session channel's requests set up before it starts.
@@ -160,88 +161,86 @@ func (d *sshServer) run(ctx context.Context, c *sshConn, ch ssh.Channel, st *ses
 	if _, err := os.Stat(shell); err != nil {
 		shell = "/bin/sh"
 	}
-	var cmd *exec.Cmd
+	var argv []string
 	switch kind {
-	case "subsystem": // sftp, served by this binary running as the workspace user
-		cmd = exec.Command(s.hookBin, "sftp-server")
+	case "subsystem": // sftp: the helper runs its own `armageddon sftp-server`
+		argv = []string{helper.SFTPServerArgv}
 	case "exec":
-		cmd = exec.Command(shell, "-c", arg)
+		argv = []string{shell, "-c", arg}
 	default:
-		cmd = exec.Command(shell, "-l")
+		argv = []string{shell, "-l"}
 	}
-	cmd.Dir = rt.p.Tree
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	st.mu.Lock()
 	usePTY := st.wantPTY && kind != "subsystem"
-	extra := append(creds.Env(), "TERM="+st.term, "SHELL="+shell)
+	extra := append(creds.Env(), "TERM="+st.term)
 	extra = append(extra, st.env...)
+	cols, rows := clampSize(st.cols), clampSize(st.rows)
 	st.mu.Unlock()
-	// SpawnInWorkspace(kind=ssh-session)
-	rt.acct.Prepare(cmd, seatEnv(rt, c.ws, creds.GitConfig(), extra...)...)
+	env := append(rt.acct.BaseEnv(), seatEnv(rt, c.ws, creds.GitConfig(), extra...)...)
 
-	var ptmx *os.File
+	// Everything runs as the workspace user through the helper: with a
+	// terminal as pty-shell (the helper opens the PTY and makes the
+	// workspace user own it), without one as ssh-session over pipes.
+	var proc helper.Process
 	var outputDone sync.WaitGroup
+	var ptmx *os.File
 	if usePTY {
-		var tty *os.File
-		ptmx, tty, err = pty.Open()
+		proc, err = s.helper.Spawn(ctx, c.ws.ID, helper.SpawnSpec{Kind: helper.KindPTYShell, Argv: argv, Env: env,
+			Dir: rt.p.Tree, Cols: cols, Rows: rows})
 		if err != nil {
-			refuse(ch, "pty: "+err.Error())
-			return
-		}
-		defer ptmx.Close()
-		os.Chown(tty.Name(), int(rt.acct.UID), int(rt.acct.GID))
-		if cmd.SysProcAttr == nil {
-			cmd.SysProcAttr = &syscall.SysProcAttr{}
-		}
-		cmd.SysProcAttr.Setsid = true
-		cmd.SysProcAttr.Setctty = true
-		cmd.Stdin, cmd.Stdout, cmd.Stderr = tty, tty, tty
-		if err := cmd.Start(); err != nil {
-			tty.Close()
 			refuse(ch, "start: "+err.Error())
 			return
 		}
-		tty.Close()
+		ptmx = proc.PTY()
+		defer ptmx.Close()
 		st.setPTY(ptmx)
 		go io.Copy(ptmx, ch)
 		outputDone.Add(1)
 		go func() { defer outputDone.Done(); io.Copy(ch, ptmx) }()
 	} else {
-		stdin, err1 := cmd.StdinPipe()
-		stdout, err2 := cmd.StdoutPipe()
-		stderr, err3 := cmd.StderrPipe()
-		if err1 != nil || err2 != nil || err3 != nil {
-			refuse(ch, "pipes failed")
-			return
+		var pipes [6]*os.File // child stdin, our stdin; our stdout, child stdout; our stderr, child stderr
+		for i := 0; i < 6; i += 2 {
+			r, w, err := os.Pipe()
+			if err != nil {
+				closeFiles(pipes[:i]...)
+				refuse(ch, "pipes failed")
+				return
+			}
+			pipes[i], pipes[i+1] = r, w
 		}
-		if err := cmd.Start(); err != nil {
+		inR, inW, outR, outW, errR, errW := pipes[0], pipes[1], pipes[2], pipes[3], pipes[4], pipes[5]
+		proc, err = s.helper.Spawn(ctx, c.ws.ID, helper.SpawnSpec{Kind: helper.KindSSHSession, Argv: argv, Env: env,
+			Dir: rt.p.Tree, Stdin: inR, Stdout: outW, Stderr: errW})
+		closeFiles(inR, outW, errW) // the child has its own copies now
+		if err != nil {
+			closeFiles(inW, outR, errR)
 			refuse(ch, "start: "+err.Error())
 			return
 		}
-		go func() { io.Copy(stdin, ch); stdin.Close() }()
+		go func() { io.Copy(inW, ch); inW.Close() }()
 		outputDone.Add(2)
-		go func() { defer outputDone.Done(); io.Copy(ch, stdout) }()
-		go func() { defer outputDone.Done(); io.Copy(ch.Stderr(), stderr) }()
+		go func() { defer outputDone.Done(); io.Copy(ch, outR); outR.Close() }()
+		go func() { defer outputDone.Done(); io.Copy(ch.Stderr(), errR); errR.Close() }()
 	}
-	s.event(c.ws.ID, "device", c.deviceID, "ssh.session", map[string]any{"kind": kind, "pty": usePTY, "pid": cmd.Process.Pid})
+	s.event(c.ws.ID, "device", c.deviceID, "ssh.session", map[string]any{"kind": kind, "pty": usePTY, "pid": proc.Pid(), "handle": proc.Handle()})
 
-	pid := cmd.Process.Pid
 	exited := make(chan struct{})
 	go func() {
 		select {
 		case <-ctx.Done():
-			syscall.Kill(-pid, syscall.SIGHUP)
+			proc.Signal(syscall.SIGHUP)
 			select {
 			case <-exited:
 			case <-time.After(2 * time.Second):
-				syscall.Kill(-pid, syscall.SIGKILL)
+				proc.Signal(syscall.SIGKILL)
 			}
 		case <-exited:
 		}
 	}()
+	var es helper.ExitStatus
 	var waitErr error
 	if usePTY {
-		waitErr = cmd.Wait()
+		es, waitErr = proc.Wait()
 		close(exited)
 		// Let the last output drain; a background job holding the tty must
 		// not keep the session open.
@@ -253,20 +252,41 @@ func (d *sshServer) run(ctx context.Context, c *sshConn, ch ssh.Channel, st *ses
 			ptmx.Close()
 		}
 	} else {
-		outputDone.Wait()
-		waitErr = cmd.Wait()
+		es, waitErr = proc.Wait()
 		close(exited)
+		// The pipes reach EOF once every holder of the write ends (the
+		// process and its children) is gone; a daemonised child must not
+		// keep the session open forever.
+		drained := make(chan struct{})
+		go func() { outputDone.Wait(); close(drained) }()
+		select {
+		case <-drained:
+		case <-ctx.Done():
+		}
 	}
-	code := 0
-	if cmd.ProcessState != nil {
-		code = cmd.ProcessState.ExitCode()
-	}
-	if code < 0 || (waitErr != nil && cmd.ProcessState == nil) {
+	code := es.ShellCode()
+	if waitErr != nil || code < 0 {
 		code = 255
 	}
 	exitStatus(ch, code)
 	ch.CloseWrite()
 	ch.Close()
+}
+
+func closeFiles(fs ...*os.File) {
+	for _, f := range fs {
+		if f != nil {
+			f.Close()
+		}
+	}
+}
+
+// clampSize turns an SSH terminal dimension into a PTY one.
+func clampSize(n uint32) uint16 {
+	if n > 0xffff {
+		return 0xffff
+	}
+	return uint16(n)
 }
 
 // directTCPIP is local port forwarding (ssh -L, VS Code port forwards). It
