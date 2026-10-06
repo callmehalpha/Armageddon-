@@ -98,12 +98,12 @@ These live on the phase branches until they merge. Run each as root on a VM:
 
 | Branch | Command | Checks |
 |---|---|---|
-| `phase2/privilege-split` | `sudo test/integration/escape.sh` | Privilege-boundary escape tests (62 checks) |
+| `phase2/privilege-split` | `sudo test/integration/escape.sh /usr/local/bin/armageddon` | Privilege-boundary escape tests (70 checks with Phase 5) |
 | `phase3/local-write` | `sudo test/e2e/write.sh /usr/local/bin/armageddon` | Local write mode and failure scenarios (59 checks) |
 | `phase3/local-write` | `go test ./test/conformance/...` | The P4 failure model against the real server (see the PR for flags) |
 | `phase4/install-ops` | `sudo test/e2e/ops.sh /usr/local/bin/armageddon` | TLS pinning, doctor, backup and restore |
 | `phase4/install-ops` | `test/install/container.sh ubuntu:24.04 …` | Real systemd install, update, rollback (needs Docker) |
-| `phase5/remote-ide` | `sudo test/e2e/ide.sh /usr/local/bin/armageddon` | code-server proxy, SSH, credentials (needs `openssh-client`) |
+| `phase5/remote-ide` | `sudo test/e2e/ide.sh /usr/local/bin/armageddon ./fake-code-server` | code-server proxy, SSH, credentials, escapes from a second workspace (needs `openssh-client`; helper as root, server as `armageddon`) |
 
 ---
 
@@ -141,8 +141,8 @@ These live on the phase branches until they merge. Run each as root on a VM:
 | B11 | **Follow uses long polling,** not WebSockets | None needed | WebSocket event bus after v0.1 (decision D4) |
 | B12 | **macOS case-only and Unicode renames** (found by P2 on macOS): capture leaves the old spelling in the index, so a checkpoint can hold both `README.md` and `readme.md` | Avoid case-only renames on macOS replicas until fixed. A Linux copy would get both files, and verification catches it | ⟨P-20⟩: port the prototype fix (`prototypes/internal/gitshadow/fold.go`) to `internal/treesync/gitshadow`, full and scoped capture. ⟨P-21⟩: apply refuses colliding paths up front |
 | B13 | **The IDE is served on the Armageddon origin** (Phase 5): JavaScript in a workspace's IDE, such as a malicious extension, runs with the viewer's Armageddon session | Single-user servers, or trusted members only | Serve code-server from a separate origin (wildcard subdomain plus a one-time ticket) before multi-user use |
-| B14 | **No network isolation between workspaces** (P8 ⟨P-18⟩, Phase 5): SSH forwards and workspace processes share the host loopback | Trusted members only | A per-workspace network namespace |
-| B15 | **Stored Git credentials are reachable by every member of the workspace** while the owner's session is open, because they share the OS user (contract §7.5) | Store credentials only in workspaces you don't share | Inherent in v0.1; per-user seats later |
+| B14 | **No network isolation between workspaces** (P8 ⟨P-18⟩, Phase 5): SSH forwards and workspace processes share the host loopback. Forwards are dialled by the server process, so they also reach loopback services of the server and of other workspaces | Trusted members only | A per-workspace network namespace |
+| B15 | **Stored Git credentials are reachable by every member of the workspace** while the owner's session is open, because they share the OS user (contract §7.5). Other workspaces' users are refused by `SO_PEERCRED` on the credential and agent sockets | Store credentials only in workspaces you don't share | Inherent in v0.1; per-user seats later |
 | B16 | **SSH membership is checked at connect time,** so removing a member doesn't drop live sessions (revoking a device does). Logging out doesn't close open IDE WebSockets | Revoke the device | Session invalidation on membership change |
 | B17 | **The helper adds about 3.5 ms per spawned process** (P6), and each workspace command costs one extra shim process (Phase 2) | None needed for interactive use | ⟨P-16⟩: a minimal non-Go trampoline (about 2.3 ms) |
 | B18 | **The encryption scheme for stored Git credentials differs:** AES-256-GCM in the code, XChaCha20-Poly1305 in contract §7.5 | None needed; both are sound | Align the contract or the code |
@@ -185,11 +185,15 @@ These live on the phase branches until they merge. Run each as root on a VM:
 - **Phase 4 (install and ops, #11):**
   - Debian 12, Fedora 40 and the Debian-based image are untested here, because their package mirrors are blocked; CI runs them.
   - A real VPS install and ACME against a real CA are manual checks (A6, A7).
-  - The code-server pin `4.96.4` in `deploy/code-server.json` has its sha256 recorded at release time. It differs from Phase 5's pin of 4.118.0, so they should be aligned at merge.
+  - The code-server pin `4.96.4` in `deploy/code-server.json` has its sha256 recorded at release time. It differs from Phase 5's pin of 4.118.0 (`internal/components`); they are not aligned yet.
   - The helper unit doesn't restrict its network, because that would also cut off the workspace processes it spawns.
   - Fixed an MVP bug: empty workspaces failed `git fsck`. `doctor --repair` fixes existing ones.
 - **Phase 5 (remote IDE, #8):**
   - See B13–B16 and B18.
+  - Integrated with the privilege split: code-server, SSH sessions and SFTP are started by the helper as the workspace user (`code-server`, `ssh-session` and, for SSH with a terminal, `pty-shell`). `ide.sh` runs the helper as root and the server as `armageddon`, and attacks the new sockets from a second workspace.
+  - The helper only starts the code-server it resolves itself, and only if the program, its symlink target and every directory above them belong to root or `armageddon` and are not group/other-writable. It checks the entry point only, not the files it loads (the real code-server's `lib/node` and `out/`), so install code-server as one root-owned tree (the component installer does). `code_server.path` must be absolute, and code-server is searched on the fixed workspace `PATH`, not the server's.
+  - The code-server socket is in the workspace's `run/` (owned by `ws-<id>`, group `armageddon`, mode 2750, socket 0660). The workspace user can still replace it; the server's `SO_PEERCRED` check (the supervised process or its child, as the workspace uid) refuses that, and the IDE then answers 502 until it restarts.
+  - Credential and agent sockets are no longer in the workspace: they are in `/run/armageddon/seat/` (0711, random names), mode 0666, served only to the workspace's uid.
   - SSH is off by default until P8 is checked with real IDEs.
   - code-server has no access to the Git credential sockets, because one instance is shared by every member.
   - The pinned code-server checksums were computed from downloads; upstream publishes no checksum file to cross-check against.
