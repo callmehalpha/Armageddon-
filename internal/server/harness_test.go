@@ -70,7 +70,9 @@ func newHarness(t *testing.T) *harness {
 	os.Chmod(dir, 0o755)
 	cfg := config.Default(filepath.Join(dir, "d"))
 	cfg.CaptureIntervalMS = 3600 * 1000
-	s, err := New(cfg)
+	// A short run directory: credential socket paths must fit sun_path
+	// (104 bytes on macOS, where TMPDIR is long).
+	s, err := New(cfg, WithRunDir(filepath.Join(dir, "r")))
 	if err != nil {
 		t.Fatal(err)
 	}

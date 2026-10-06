@@ -290,7 +290,7 @@ func (s *Server) openSeatCredentials(rt *runtime, userID string) (*seatCredentia
 		}()
 		return nil
 	}
-	tag := ids.Secret(16)
+	tag := ids.Secret(10) // 80 bits, 16 characters: keeps sun_path short (macOS: 104 bytes)
 	if https {
 		sc.credPath = filepath.Join(dir, "c-"+tag+".sock")
 		if err := listen(sc.credPath, sc.serveCredential); err != nil {
