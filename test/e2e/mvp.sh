@@ -155,6 +155,9 @@ step "3. work on the server seat"
 S0=$(seq_of "$WS")
 as_ws "$WS" "printf 'hello from the server\r\n' > notes.txt && mkdir -p src && echo 'package main' > src/main.go && git add src && git commit -qm 'add main' && echo 'staged' > staged.txt && git add staged.txt && echo 'unstaged edit' >> staged.txt && echo 'API_KEY=dev' > .env"
 wait_seq_gt "$WS" "$S0"
+# The capture loop may have committed a half-finished edit script: capture
+# the final state explicitly before testing that a further sync is a no-op.
+api POST "/api/workspaces/$WS/sync" '' >/dev/null
 S1=$(seq_of "$WS")
 pass "edits captured as checkpoint #$S1 (commit, staged, unstaged, untracked, .env)"
 api POST "/api/workspaces/$WS/sync" '' >/dev/null
