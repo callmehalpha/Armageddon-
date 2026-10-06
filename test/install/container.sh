@@ -45,6 +45,7 @@ cat >"$ctx/Dockerfile" <<EOF
 FROM $IMAGE
 $pre
 RUN $prep
+RUN systemctl mask systemd-resolved.service 2>/dev/null || true
 STOPSIGNAL SIGRTMIN+3
 CMD ["/lib/systemd/systemd"]
 EOF
@@ -57,9 +58,13 @@ for _ in $(seq 60); do
   sleep 1
 done
 check "systemd is up in the container ($st)" bash -c "case '$st' in running|degraded) true ;; *) false ;; esac"
-# Host networking, but the image's /etc/resolv.conf may point into /run
-# (Fedora: systemd-resolved), which is an empty tmpfs here: use the host's.
-dx sh -c 'rm -f /etc/resolv.conf && cat >/etc/resolv.conf' </etc/resolv.conf
+# DNS: with host networking the container must use the runner's upstream
+# resolvers, not a 127.0.0.53 stub (the image's own systemd-resolved is
+# masked below). /etc/resolv.conf is usually a Docker bind mount (write
+# through it) but may be a dangling link into the /run tmpfs (replace it).
+resolv=/etc/resolv.conf
+[ -f /run/systemd/resolve/resolv.conf ] && resolv=/run/systemd/resolve/resolv.conf
+dx sh -c 'if [ -L /etc/resolv.conf ]; then rm -f /etc/resolv.conf; fi; cat >/etc/resolv.conf' <"$resolv"
 
 docker cp "$D1/armageddon-$V1-linux-$ARCH.tar" "$NAME:/root/r1.tar"
 docker cp "$D2/armageddon-$V2-linux-$ARCH.tar" "$NAME:/root/r2.tar"
