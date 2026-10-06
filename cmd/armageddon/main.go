@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/callmehalpha/Armageddon-/internal/agent"
+	"github.com/callmehalpha/Armageddon-/internal/components"
 	"github.com/callmehalpha/Armageddon-/internal/config"
 	"github.com/callmehalpha/Armageddon-/internal/helper"
 	"github.com/callmehalpha/Armageddon-/internal/server"
@@ -30,6 +31,7 @@ Server:
   armageddon server init  [--data DIR] [--listen ADDR] [--public-url URL]
                           [--domain D --acme-email E [--acme-staging]] | [--ip-only [--ip A,B]]
                           | [--tls-cert F --tls-key F]
+                          [--ssh-listen ADDR] [--code-server PATH]
   armageddon server run   [--data DIR] [--helper-socket PATH] [--dev]
   armageddon helper       [--data DIR] [--socket PATH] [--server-user NAME]   (as root)
   armageddon server fingerprint                  print the TLS certificate fingerprint
@@ -39,6 +41,7 @@ Server:
   armageddon server rollback [--keep-db]
   armageddon server uninstall [--purge]
   armageddon server migrate [--data DIR]         apply database migrations and exit
+  armageddon server components install code-server [--version V] [--data DIR]
   armageddon doctor [--data DIR] [--repair] [--json]
 
 Device:
@@ -55,6 +58,8 @@ Device:
   armageddon quarantine list|diff ID|apply ID|export ID DIR|drop ID
                                                  changes kept aside instead of being overwritten
   armageddon sync <workspace>                    checkpoint the server seat now
+  armageddon ssh-config [workspace...] [--file F | --print]
+                                                 write ~/.ssh/config Host blocks for the SSH endpoint
   armageddon logout                              forget this device's credentials
 
 Other:
@@ -93,6 +98,25 @@ func main() {
 			op = args[0]
 		}
 		err = agent.CredentialHelper(op, os.Stdin, os.Stdout)
+	case "seat-credential":
+		// Git credential helper inside server-seat sessions (workspace user).
+		op := ""
+		if len(args) > 0 {
+			op = args[0]
+		}
+		err = server.SeatCredentialHelper(op, os.Stdin, os.Stdout)
+	case "sftp-server":
+		// Started by the SSH endpoint as the workspace user.
+		err = server.SFTPServerMain()
+	case "ssh-config":
+		fs := flag.NewFlagSet("ssh-config", flag.ExitOnError)
+		file := fs.String("file", "", "ssh config file to update (default ~/.ssh/config; - prints)")
+		print := fs.Bool("print", false, "print the Host blocks instead of writing them")
+		fs.Parse(reorder(args))
+		if *print {
+			*file = "-"
+		}
+		err = withClient(func(c *agent.Client) error { return c.SSHConfig(fs.Args(), *file, os.Stdout) })
 	case "login":
 		fs := flag.NewFlagSet("login", flag.ExitOnError)
 		name := fs.String("name", "", "device name (default: hostname)")
@@ -287,7 +311,7 @@ func reorder(args []string) []string {
 
 func serverCmd(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: armageddon server init|run|backup|restore|update|rollback|uninstall|fingerprint|migrate [flags]")
+		return fmt.Errorf("usage: armageddon server init|run|backup|restore|update|rollback|uninstall|fingerprint|migrate|components [flags]")
 	}
 	if op, ok := opsCommands[args[0]]; ok {
 		return op(ctx, args[1:])
@@ -330,6 +354,25 @@ func serverCmd(ctx context.Context, args []string) error {
 		return s.Run(ctx)
 	}
 	return fmt.Errorf("unknown server command %q", args[0])
+}
+
+// componentsCmd is `armageddon server components install code-server
+// [--version v] [--sha256 hex] [--data DIR]`.
+func componentsCmd(args []string) error {
+	if len(args) < 2 || args[0] != "install" || args[1] != "code-server" {
+		return fmt.Errorf("usage: armageddon server components install code-server [--version V] [--sha256 HEX] [--data DIR]")
+	}
+	fs := flag.NewFlagSet("components install", flag.ExitOnError)
+	data := fs.String("data", config.DefaultDataDir(), "data directory")
+	ver := fs.String("version", components.CodeServerVersion, "code-server version")
+	sum := fs.String("sha256", "", "expected SHA-256 of the release tarball (required for versions not pinned in this build)")
+	fs.Parse(args[2:])
+	exe, err := components.InstallCodeServer(*data, *ver, *sum, os.Stdout)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("code-server is ready at %s; the server finds it there automatically.\n", exe)
+	return nil
 }
 
 // pickHelper chooses how the server reaches privileged operations: the

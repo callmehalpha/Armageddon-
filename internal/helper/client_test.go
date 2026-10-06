@@ -141,8 +141,22 @@ func TestDevSpawn(t *testing.T) {
 	if _, err := d.Spawn(ctx, ws, SpawnSpec{Kind: KindRuntimeCommand, Argv: []string{"true"}, Dir: "/tmp"}); err == nil {
 		t.Fatal("cwd outside the workspace accepted")
 	}
-	if _, err := d.Spawn(ctx, ws, SpawnSpec{Kind: KindCodeServer, Argv: []string{"true"}, Dir: tree}); err != ErrReservedKind {
-		t.Fatalf("reserved kind: %v", err)
+	if _, err := d.Spawn(ctx, ws, SpawnSpec{Kind: KindCodeServer, Argv: []string{"true"}, Dir: tree}); err == nil {
+		t.Fatal("code-server with a relative program accepted")
+	}
+	if _, err := d.Spawn(ctx, ws, SpawnSpec{Kind: KindSSHSession, Argv: []string{"true"}, Dir: tree}); err == nil {
+		t.Fatal("ssh-session running a non-shell accepted")
+	}
+	// ssh-session: a listed shell with stdio, and SHELL set.
+	r2, w2, _ := os.Pipe()
+	p, err = d.Spawn(ctx, ws, SpawnSpec{Kind: KindSSHSession, Argv: []string{"/bin/sh", "-c", `echo "$SHELL"`}, Dir: tree, Stdout: w2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w2.Close()
+	out2, _ := io.ReadAll(r2)
+	if st, err := p.Wait(); err != nil || st.Code != 0 || string(out2) != "/bin/sh\n" {
+		t.Fatalf("ssh-session: %+v %v %q", st, err, out2)
 	}
 
 	// pty-shell: the PTY comes back, signals reach the handle.

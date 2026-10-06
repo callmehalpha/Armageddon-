@@ -43,6 +43,9 @@ type Server struct {
 	// the directory of the helper socket (/run/armageddon), or a private
 	// temp directory without a helper.
 	RunDir string `json:"run_dir,omitempty"`
+
+	CodeServer CodeServer `json:"code_server"`
+	SSH        SSH        `json:"ssh"`
 }
 
 // TStale and THandoff return the lease timers with their defaults applied.
@@ -60,6 +63,26 @@ func (c *Server) THandoff() time.Duration {
 	return 30 * time.Second
 }
 
+// CodeServer configures the browser IDE (plan M4.3).
+type CodeServer struct {
+	// Path to the code-server executable. Empty: look in PATH, then in the
+	// data directory's components/ (`armageddon server components install`).
+	Path string `json:"path,omitempty"`
+	// IdleTimeoutMin stops an instance with no traffic for this long
+	// (default 30).
+	IdleTimeoutMin int `json:"idle_timeout_min,omitempty"`
+}
+
+// SSH configures the embedded SSH endpoint (plan M4.4). Off by default until
+// the P8 spike shows VS Code Remote-SSH and JetBrains Gateway work with it.
+type SSH struct {
+	Enabled bool   `json:"enabled"`
+	Listen  string `json:"listen,omitempty"` // default ":2222"
+	// PublicAddr is host:port as clients reach it; `armageddon ssh-config`
+	// writes it. Default: the public URL's host and the listen port.
+	PublicAddr string `json:"public_addr,omitempty"`
+}
+
 func DefaultDataDir() string {
 	if os.Geteuid() == 0 {
 		return "/var/lib/armageddon"
@@ -71,7 +94,8 @@ func DefaultDataDir() string {
 }
 
 func Default(dataDir string) *Server {
-	return &Server{Version: Version, DataDir: dataDir, Listen: ":8080", PublicURL: "http://localhost:8080", CaptureIntervalMS: 2000}
+	return &Server{Version: Version, DataDir: dataDir, Listen: ":8080", PublicURL: "http://localhost:8080", CaptureIntervalMS: 2000,
+		CodeServer: CodeServer{IdleTimeoutMin: 30}, SSH: SSH{Listen: ":2222"}}
 }
 
 func Path(dataDir string) string { return filepath.Join(dataDir, "server.json") }
@@ -93,6 +117,12 @@ func Load(dataDir string) (*Server, error) {
 	c.DataDir = dataDir
 	if c.CaptureIntervalMS <= 0 {
 		c.CaptureIntervalMS = 2000
+	}
+	if c.CodeServer.IdleTimeoutMin <= 0 {
+		c.CodeServer.IdleTimeoutMin = 30
+	}
+	if c.SSH.Listen == "" {
+		c.SSH.Listen = ":2222"
 	}
 	return c, nil
 }

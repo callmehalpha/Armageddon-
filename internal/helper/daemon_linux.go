@@ -331,11 +331,18 @@ func (d *Daemon) prepareDirs(wsID string) error {
 		if err == nil && st.Uid != 0 && st.Uid != d.ServerUID && st.Uid != u.uid {
 			err = fmt.Errorf("%s is owned by uid %d, not this workspace: refused", name, st.Uid)
 		}
-		if err == nil {
-			err = unix.Fchown(fd, int(u.uid), int(u.gid))
+		gid, mode := u.gid, uint32(0o700)
+		if name == RunDir {
+			// The code-server socket lives here: the server's group may
+			// traverse and connect (setgid, so sockets get that group),
+			// other workspace users may not even look up names.
+			gid, mode = d.ServerGID, RunDirMode
 		}
 		if err == nil {
-			err = unix.Fchmod(fd, 0o700)
+			err = unix.Fchown(fd, int(u.uid), int(gid))
+		}
+		if err == nil {
+			err = unix.Fchmod(fd, mode)
 		}
 		unix.Close(fd)
 		if err != nil {
@@ -448,25 +455,6 @@ func (d *Daemon) repairDir(dirfd int, depth int) (int, error) {
 
 // ---- processes ----
 
-var shells = map[string]bool{"/bin/bash": true, "/bin/sh": true, "/usr/bin/bash": true, "/usr/bin/sh": true,
-	"/bin/zsh": true, "/usr/bin/zsh": true, "/usr/bin/fish": true}
-
-// resolveProgram finds argv[0] on the fixed workspace PATH. The program
-// runs as the workspace user, so this is about predictability, not
-// privilege.
-func resolveProgram(name string) (string, error) {
-	if strings.Contains(name, "/") {
-		return name, nil
-	}
-	for _, dir := range filepath.SplitList(SafePath) {
-		p := filepath.Join(dir, name)
-		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() && fi.Mode()&0o111 != 0 {
-			return p, nil
-		}
-	}
-	return "", fmt.Errorf("%s: not found on the workspace PATH", name)
-}
-
 func (d *Daemon) spawn(ctx context.Context, conn *net.UnixConn, req *Request, files []*os.File) {
 	defer closeAll(files)
 	fail := func(err error) {
@@ -478,15 +466,14 @@ func (d *Daemon) spawn(ctx context.Context, conn *net.UnixConn, req *Request, fi
 		fail(ErrReservedKind)
 		return
 	}
-	switch s.Kind {
-	case KindGitService:
-		if s.Argv[0] != "git" {
-			fail(errors.New("git-service runs git only"))
-			return
-		}
-	case KindPTYShell:
-		if !shells[s.Argv[0]] {
-			fail(fmt.Errorf("pty-shell: %s is not an allowed shell", s.Argv[0]))
+	prog, argv, err := programFor(s.Kind, s.Argv, d.Exe)
+	if err != nil {
+		fail(err)
+		return
+	}
+	if s.Kind == KindCodeServer {
+		if err := d.checkCodeServer(prog); err != nil {
+			fail(err)
 			return
 		}
 	}
@@ -503,14 +490,9 @@ func (d *Daemon) spawn(ctx context.Context, conn *net.UnixConn, req *Request, fi
 		fail(err)
 		return
 	}
-	prog, err := resolveProgram(s.Argv[0])
-	if err != nil {
-		fail(err)
-		return
-	}
 	env := []string{"PATH=" + SafePath, "HOME=" + filepath.Join(d.wsRoot(req.Workspace), "home"), "USER=" + u.name, "LOGNAME=" + u.name}
-	if s.Kind == KindPTYShell {
-		env = append(env, "SHELL="+s.Argv[0])
+	if sh := shellFor(s.Kind, s.Argv); sh != "" {
+		env = append(env, "SHELL="+sh)
 	}
 	for _, kv := range s.Env {
 		if EnvAllowed(kv) {
@@ -540,7 +522,7 @@ func (d *Daemon) spawn(ctx context.Context, conn *net.UnixConn, req *Request, fi
 		}
 	}
 	build := func() *exec.Cmd {
-		cmd := &exec.Cmd{Path: d.Exe, Args: append([]string{d.Exe, "helper-nnp", "--", prog}, s.Argv...), Env: env, Dir: s.Cwd}
+		cmd := &exec.Cmd{Path: d.Exe, Args: append([]string{d.Exe, "helper-nnp", "--", prog}, argv...), Env: env, Dir: s.Cwd}
 		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: u.uid, Gid: u.gid, Groups: []uint32{}}}
 		if tty != nil {
 			cmd.Stdin, cmd.Stdout, cmd.Stderr = tty, tty, tty

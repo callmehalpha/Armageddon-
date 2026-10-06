@@ -89,9 +89,18 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 			now := store.Now()
 			if err == nil && now < x.ExpiresAt && now-x.LastSeenAt < sessionIdle.Milliseconds() {
 				if u, err := s.store.UserByID(x.UserID); err == nil && !u.Disabled {
-					if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Header.Get("X-CSRF-Token") != x.CSRF {
-						writeErr(rw, http.StatusForbidden, "missing or invalid CSRF token")
-						return
+					if r.Method != http.MethodGet && r.Method != http.MethodHead {
+						// code-server cannot send our CSRF header; IDE
+						// requests must come from this origin instead.
+						if isIDEPath(r.URL.Path) {
+							if !sameOrigin(r) {
+								writeErr(rw, http.StatusForbidden, "cross-origin request refused")
+								return
+							}
+						} else if r.Header.Get("X-CSRF-Token") != x.CSRF {
+							writeErr(rw, http.StatusForbidden, "missing or invalid CSRF token")
+							return
+						}
 					}
 					if now-x.LastSeenAt > time.Minute.Milliseconds() {
 						s.store.TouchSession(x.ID, now)
@@ -445,6 +454,7 @@ func (s *Server) handleRevokeDevice(rw http.ResponseWriter, r *http.Request) {
 		writeErr(rw, 404, "no such device")
 		return
 	}
+	s.sshd.closeDevice(id, "this device was revoked")
 	s.event("", "user", userOf(r).ID, "device.revoked", map[string]string{"device_id": id})
 	// A revoked device that holds a lease loses it at once (§3.2, F12).
 	s.revokeLeases(id, userOf(r).ID)

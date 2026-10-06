@@ -32,6 +32,9 @@ const (
 // paths is the on-disk layout of one workspace (contract §2.4).
 type paths struct {
 	Root, Repo, Tree, Home, SeatDir, SeatShadow, SeatIndex, Checkpoints, Hooks string
+	// Run holds per-session sockets (code-server, credential helper, SSH
+	// agent). Owned by and private to the workspace user.
+	Run string
 }
 
 func (s *Server) pathsFor(id string) paths {
@@ -46,6 +49,7 @@ func (s *Server) pathsFor(id string) paths {
 		SeatIndex:   filepath.Join(root, "seat", "capture.index"),
 		Checkpoints: filepath.Join(root, "checkpoints.git"),
 		Hooks:       filepath.Join(root, "hooks"),
+		Run:         filepath.Join(root, "run"),
 	}
 }
 

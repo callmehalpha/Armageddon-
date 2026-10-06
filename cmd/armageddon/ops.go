@@ -39,6 +39,7 @@ var opsCommands = map[string]func(context.Context, []string) error{
 	"rollback":    serverRollback,
 	"uninstall":   serverUninstall,
 	"health":      serverHealth,
+	"components":  func(_ context.Context, args []string) error { return componentsCmd(args) },
 }
 
 // serverHealth waits until the local server answers /healthz (installer,
@@ -70,6 +71,8 @@ func serverInit(_ context.Context, args []string) error {
 	ipOnly := fs.Bool("ip-only", false, "no domain: generate a self-signed certificate and print its fingerprint")
 	ips := fs.String("ip", "", "comma-separated IP addresses or names for the self-signed certificate (default: detected)")
 	newCert := fs.Bool("new-cert", false, "replace an existing self-signed certificate (clients must re-pin)")
+	sshListen := fs.String("ssh-listen", "", "enable the SSH endpoint on this address, e.g. :2222 (experimental, gated on P8)")
+	codeServer := fs.String("code-server", "", "path to the code-server executable")
 	owner := fs.String("owner", "", "user that runs the server; server files are chowned to it (installer sets this)")
 	fs.Parse(args)
 	modes := 0
@@ -150,6 +153,12 @@ func serverInit(_ context.Context, args []string) error {
 	}
 	if *public != "" {
 		cfg.PublicURL = strings.TrimRight(*public, "/")
+	}
+	if *sshListen != "" {
+		cfg.SSH.Enabled, cfg.SSH.Listen = true, *sshListen
+	}
+	if *codeServer != "" {
+		cfg.CodeServer.Path = *codeServer
 	}
 	if err := cfg.Save(); err != nil {
 		return err

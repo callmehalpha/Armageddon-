@@ -90,15 +90,19 @@ const (
 	KindPTYShell       Kind = "pty-shell"
 	KindGitService     Kind = "git-service"
 	KindRuntimeCommand Kind = "runtime-command"
-	// Reserved for later phases (code-server M4.3, SSH endpoint M4.4).
-	// They decode, and are refused as not implemented.
+	// KindCodeServer is the browser IDE (M4.3): only the configured or
+	// installed code-server, which no workspace can replace.
 	KindCodeServer Kind = "code-server"
+	// KindSSHSession is a non-PTY SSH session (M4.4): a listed shell or the
+	// SFTP server. SSH sessions with a terminal use pty-shell.
 	KindSSHSession Kind = "ssh-session"
 )
 
+// kinds is the enum; false marks a kind reserved for a later phase (it
+// decodes, and is refused as not implemented). None is reserved today.
 var kinds = map[Kind]bool{
 	KindPTYShell: true, KindGitService: true, KindRuntimeCommand: true,
-	KindCodeServer: false, KindSSHSession: false, // false: reserved
+	KindCodeServer: true, KindSSHSession: true,
 }
 
 // Kinds returns every process kind in the enum, implemented or reserved.
@@ -213,7 +217,7 @@ func EnvAllowed(kv string) bool {
 		return false
 	}
 	switch k {
-	case "TERM", "LANG", "TZ", "COLORTERM":
+	case "TERM", "LANG", "TZ", "COLORTERM", "SSH_AUTH_SOCK":
 		return true
 	}
 	return strings.HasPrefix(k, "LC_") || strings.HasPrefix(k, "GIT_") || strings.HasPrefix(k, "ARMAGEDDON_")

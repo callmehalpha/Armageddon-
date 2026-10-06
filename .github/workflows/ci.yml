@@ -145,3 +145,23 @@ jobs:
       - uses: actions/checkout@v4
       - name: compose deployment
         run: test/e2e/compose.sh
+
+  e2e-ide:
+    # Phase 5: code-server proxy (with a fake code-server), SSH endpoint via
+    # the OpenSSH client, Git-provider credentials, and escapes from a second
+    # workspace. The helper runs as root, the server as the armageddon user
+    # (ide.sh sets both up, like mvp.sh).
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build -o armageddon ./cmd/armageddon
+      - run: go build -o fake-code-server ./test/e2e/fakecodeserver
+      - name: remote IDE acceptance test
+        run: |
+          sudo install -m 0755 armageddon /usr/local/bin/armageddon
+          sudo mkdir -p /srv && sudo chmod 755 /srv
+          sudo -E env "PATH=$PATH" test/e2e/ide.sh /usr/local/bin/armageddon "$PWD/fake-code-server"

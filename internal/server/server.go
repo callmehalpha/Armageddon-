@@ -19,6 +19,7 @@ import (
 	"github.com/callmehalpha/Armageddon-/internal/config"
 	"github.com/callmehalpha/Armageddon-/internal/helper"
 	"github.com/callmehalpha/Armageddon-/internal/ids"
+	"github.com/callmehalpha/Armageddon-/internal/secretbox"
 	"github.com/callmehalpha/Armageddon-/internal/store"
 	"github.com/callmehalpha/Armageddon-/internal/tlsedge"
 )
@@ -38,6 +39,12 @@ type Server struct {
 	rts map[string]*runtime // per-workspace runtime, by workspace ID
 
 	sessions sessionRegistry // interactive server-seat sessions (§4.3)
+
+	keys   *secretbox.Keyring // server data key (§7.5)
+	credMu sync.Mutex         // serialises credential writes with key rotation
+
+	ide  *ideManager // code-server instances (M4.3)
+	sshd *sshServer  // embedded SSH endpoint (M4.4), nil unless enabled
 
 	clock func() int64 // unix ms; tests replace it (lease timers)
 
@@ -90,6 +97,10 @@ func New(cfg *config.Server, opts ...Option) (*Server, error) {
 	if err := s.installHookBinary(); err != nil {
 		return nil, fmt.Errorf("install hook binary: %w", err)
 	}
+	if s.keys, err = secretbox.Open(filepath.Join(cfg.DataDir, "keys", "data.key")); err != nil {
+		return nil, fmt.Errorf("data key: %w", err)
+	}
+	s.ide = newIDEManager(s)
 	return s, nil
 }
 
@@ -151,6 +162,14 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	}
 	go s.janitor(ctx)
+	go s.ide.reap(ctx)
+	if s.cfg.SSH.Enabled {
+		sshd, err := s.startSSH(ctx, s.cfg.SSH.Listen)
+		if err != nil {
+			return fmt.Errorf("ssh endpoint: %w", err)
+		}
+		s.sshd = sshd
+	}
 
 	srv := &http.Server{Addr: s.cfg.Listen, Handler: s.routes(), ReadHeaderTimeout: 15 * time.Second}
 	ln, err := tlsedge.Listen(ctx, s.cfg)
@@ -171,6 +190,10 @@ func (s *Server) Run(ctx context.Context) error {
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		srv.Shutdown(shutdown)
+		if s.sshd != nil {
+			s.sshd.Close()
+		}
+		s.ide.stopAll("the server is shutting down")
 		s.mu.Lock()
 		for _, rt := range s.rts {
 			rt.stop()
