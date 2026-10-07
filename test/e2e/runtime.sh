@@ -184,13 +184,15 @@ if command -v php >/dev/null && [ -x /usr/bin/php ]; then
   api admin POST "/api/workspaces/$WP/runtime/stop" '{}' >/dev/null
   if command -v composer >/dev/null; then
     # A sample Laravel app from a fresh skeleton, as a clone would bring
-    # it: no vendor/, no .env, no database.
+    # it: no vendor/, no .env, no database. Unpinned: Composer picks the
+    # newest skeleton the runner's PHP supports, and refuses framework
+    # releases with security advisories, which old majors accumulate.
     WL=$(api admin POST /api/workspaces '{"name":"laravel-app"}' | json 'd["id"]')
     wait_ready "$WL"
     LTREE=$DATA/workspaces/$WL/tree LHOME=$DATA/workspaces/$WL/home
     LOWNER=$(stat -c %U "$LTREE")
     runuser -u "$LOWNER" -- env -C "$LHOME" HOME="$LHOME" composer create-project --no-install --no-scripts --no-interaction -q \
-      laravel/laravel:^11.0 "$LHOME/skeleton" || fail "composer create-project"
+      laravel/laravel "$LHOME/skeleton" || fail "composer create-project"
     runuser -u "$LOWNER" -- cp -a "$LHOME/skeleton/." "$LTREE/"
     check "detected Laravel" test "$(api admin GET "/api/workspaces/$WL/runtime" | json 'd["plan"]["provider"]+"/"+d["plan"]["framework"]')" = php/laravel
     api admin POST "/api/workspaces/$WL/runtime/install" >/dev/null
