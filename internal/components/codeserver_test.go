@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -106,6 +107,31 @@ func TestExtractRejectsEscapes(t *testing.T) {
 	} {
 		if err := extractTarGz(bytes.NewReader(tarball(t, es)), t.TempDir()); err == nil {
 			t.Fatalf("archive %v was accepted", es)
+		}
+	}
+}
+
+// TestReleasePinMatches keeps deploy/code-server.json (the release
+// manifest's pin) and this package's pins on the same version and checksums.
+func TestReleasePinMatches(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "deploy", "code-server.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pin struct {
+		Version string
+		Files   []struct{ OS, Arch, SHA256 string }
+	}
+	if err := json.Unmarshal(b, &pin); err != nil {
+		t.Fatal(err)
+	}
+	if pin.Version != CodeServerVersion {
+		t.Fatalf("deploy/code-server.json pins %s, CodeServerVersion is %s", pin.Version, CodeServerVersion)
+	}
+	for _, f := range pin.Files {
+		key := pin.Version + "/" + f.OS + "-" + f.Arch
+		if want := codeServerSHA256[key]; want == "" || f.SHA256 != want {
+			t.Errorf("%s: deploy/code-server.json has sha256 %q, codeServerSHA256 has %q", key, f.SHA256, want)
 		}
 	}
 }

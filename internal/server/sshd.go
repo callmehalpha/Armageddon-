@@ -207,6 +207,15 @@ func (d *sshServer) handle(nc net.Conn) {
 	d.mu.Lock()
 	d.conns[c] = struct{}{}
 	d.mu.Unlock()
+	// A revocation that landed after authenticate but before c joined
+	// d.conns was missed by closeDevice; the store already says so.
+	if dev, err := d.s.store.DeviceByID(c.deviceID); err != nil || dev.Revoked {
+		d.mu.Lock()
+		delete(d.conns, c)
+		d.mu.Unlock()
+		conn.Close()
+		return
+	}
 	unregister := d.s.sessions.Register(w.ID, SessionSSH, c.userID, c.close)
 	d.s.store.TouchDevice(c.deviceID, store.Now())
 	d.s.event(w.ID, "device", c.deviceID, "ssh.connected", map[string]string{"remote": nc.RemoteAddr().String()})

@@ -185,7 +185,7 @@ These live on the phase branches until they merge. Run each as root on a VM:
 - **Phase 4 (install and ops, #11):**
   - Debian 12, Fedora 40 and the Debian-based image are untested here, because their package mirrors are blocked; CI runs them.
   - A real VPS install and ACME against a real CA are manual checks (A6, A7).
-  - The code-server pin `4.96.4` in `deploy/code-server.json` has its sha256 recorded at release time. It differs from Phase 5's pin of 4.118.0 (`internal/components`); they are not aligned yet.
+  - The release pin in `deploy/code-server.json` and Phase 5's pin in `internal/components` are both code-server 4.118.0, with the same checksums; `TestReleasePinMatches` fails if they drift apart. Because the pin file carries the checksums, the release build checks the downloads against the repository.
   - The helper unit doesn't restrict its network, because that would also cut off the workspace processes it spawns.
   - Fixed an MVP bug: empty workspaces failed `git fsck`. `doctor --repair` fixes existing ones.
 - **Phase 5 (remote IDE, #8):**
