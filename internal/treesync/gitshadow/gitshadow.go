@@ -219,6 +219,9 @@ func (s *Shadow) CaptureTree() (string, CaptureStats, error) {
 	if _, err := s.Git(nil, "add", "-A", "--", "."); err != nil {
 		return "", st, err
 	}
+	if err := s.dropFoldedStale(); err != nil {
+		return "", st, err
+	}
 	// Preserve: ignored-but-wanted files (.env*). --directory collapses
 	// ignored directories so node_modules is not descended into.
 	if len(s.Preserve) > 0 {
@@ -292,6 +295,11 @@ func (s *Shadow) CaptureTreeScoped(changed []string, prevEmpty []string) (string
 	var dirs []string
 	for d := range dirSet {
 		dirs = append(dirs, d)
+	}
+	// A case-only rename leaves the old spelling indexed under the renamed
+	// entry's parent, which the watcher reported a change in.
+	if err := s.dropFoldedStale(dirs...); err != nil {
+		return "", st, err
 	}
 	if len(s.Preserve) > 0 {
 		out, err := s.Git(nil, append([]string{"--literal-pathspecs", "ls-files", "-z", "-o", "-i", "--exclude-standard", "--directory", "--"}, dirs...)...)
@@ -643,6 +651,9 @@ func (s *Shadow) Apply(from, to string, opt ApplyOptions) error {
 	if err != nil {
 		return err
 	}
+	if err := s.checkCollisions(toWT, toMeta.EmptyDirs); err != nil {
+		return err
+	}
 	if !opt.Resume {
 		cur, _, err := s.CaptureTree()
 		if err != nil {
@@ -660,15 +671,18 @@ func (s *Shadow) Apply(from, to string, opt ApplyOptions) error {
 // attributes normalise line endings or filters run on checkout, so the
 // replica's own capture is used as the base instead of assuming equality.
 func (s *Shadow) Seed(to string) error {
-	cur, st, err := s.CaptureTree()
-	if err != nil {
-		return err
-	}
 	toWT, err := s.worktreeOf(to)
 	if err != nil {
 		return err
 	}
 	toMeta, err := s.ReadMeta(to)
+	if err != nil {
+		return err
+	}
+	if err := s.checkCollisions(toWT, toMeta.EmptyDirs); err != nil {
+		return err
+	}
+	cur, st, err := s.CaptureTree()
 	if err != nil {
 		return err
 	}

@@ -140,7 +140,7 @@ These live on the phase branches until they merge. Run each as root on a VM:
 | B9 | **The acceptance test leaves `ws-*` users behind** | Use a throwaway VM, or clean up: `getent passwd \| cut -d: -f1 \| grep '^ws-' \| xargs -r -n1 sudo userdel` | Add cleanup to `mvp.sh` |
 | B10 | **Server-seat trash recording for local Git is best effort** (P-13): a workspace can edit its own `repo.git/config` | Device pushes are always protected; server-seat trash refs cover normal use | By design (contract §5.4) |
 | B11 | **Follow uses long polling,** not WebSockets | None needed | WebSocket event bus after v0.1 (decision D4) |
-| B12 | **macOS case-only and Unicode renames** (found by P2 on macOS): capture leaves the old spelling in the index, so a checkpoint can hold both `README.md` and `readme.md` | Avoid case-only renames on macOS replicas until fixed. A Linux copy would get both files, and verification catches it | ⟨P-20⟩: port the prototype fix (`prototypes/internal/gitshadow/fold.go`) to `internal/treesync/gitshadow`, full and scoped capture. ⟨P-21⟩: apply refuses colliding paths up front |
+| B12 | ~~**macOS case-only and Unicode renames**~~ Fixed: capture (full and scoped) drops index entries not spelled as `readdir()` reports them, and apply refuses a checkpoint whose paths collide on the replica with an explicit collision error | — | Done (⟨P-20⟩, ⟨P-21⟩, `internal/treesync/gitshadow/fold.go`); tested on the macOS CI leg |
 | B13 | **The IDE is served on the Armageddon origin** (Phase 5): JavaScript in a workspace's IDE, such as a malicious extension, runs with the viewer's Armageddon session | Single-user servers, or trusted members only | Serve code-server from a separate origin (wildcard subdomain plus a one-time ticket) before multi-user use |
 | B14 | **No network isolation between workspaces** (P8 ⟨P-18⟩, Phase 5): SSH forwards and workspace processes share the host loopback. Forwards are dialled by the server process, so they also reach loopback services of the server and of other workspaces | Trusted members only | A per-workspace network namespace |
 | B15 | **Stored Git credentials are reachable by every member of the workspace** while the owner's session is open, because they share the OS user (contract §7.5). Other workspaces' users are refused by `SO_PEERCRED` on the credential and agent sockets | Store credentials only in workspaces you don't share | Inherent in v0.1; per-user seats later |
@@ -192,7 +192,7 @@ These live on the phase branches until they merge. Run each as root on a VM:
 - **Phase 4 (install and ops, #11):**
   - Debian 12, Fedora 40 and the Debian-based image are untested here, because their package mirrors are blocked; CI runs them.
   - A real VPS install and ACME against a real CA are manual checks (A6, A7).
-  - The code-server pin `4.96.4` in `deploy/code-server.json` has its sha256 recorded at release time. It differs from Phase 5's pin of 4.118.0 (`internal/components`); they are not aligned yet.
+  - The release pin in `deploy/code-server.json` and Phase 5's pin in `internal/components` are both code-server 4.118.0, with the same checksums; `TestReleasePinMatches` fails if they drift apart. Because the pin file carries the checksums, the release build checks the downloads against the repository.
   - The helper unit doesn't restrict its network, because that would also cut off the workspace processes it spawns.
   - Fixed an MVP bug: empty workspaces failed `git fsck`. `doctor --repair` fixes existing ones.
 - **M8 (runtimes and Docker):**
