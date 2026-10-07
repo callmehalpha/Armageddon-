@@ -195,6 +195,9 @@ if command -v php >/dev/null && [ -x /usr/bin/php ]; then
     check "detected Laravel" test "$(api admin GET "/api/workspaces/$WL/runtime" | json 'd["plan"]["provider"]+"/"+d["plan"]["framework"]')" = php/laravel
     api admin POST "/api/workspaces/$WL/runtime/install" >/dev/null
     wait_proc "$WL" install state exited 900
+    if [ "$(proc "$WL" install exit_code)" != 0 ]; then
+      echo "--- install output"; api admin GET "/api/workspaces/$WL/runtime/logs?name=install" | json 'd["data"]' | tail -60
+    fi
     check "composer install, .env, key and SQLite migration (exit 0)" test "$(proc "$WL" install exit_code)" = 0
     check "APP_KEY set" grep -q '^APP_KEY=base64:' "$LTREE/.env"
     api admin POST "/api/workspaces/$WL/runtime/start" '{}' >/dev/null
