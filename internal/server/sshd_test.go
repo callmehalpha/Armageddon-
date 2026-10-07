@@ -117,7 +117,30 @@ func TestSSHAuthentication(t *testing.T) {
 	}
 
 	// Revocation drops live connections and refuses new ones.
+	// ssh.Dial returns once the client handshake is done, before the server
+	// registers the connection, so wait for the earlier connections to
+	// leave and the new one to arrive: closeDevice must find it.
+	devConns := func() int {
+		f.h.s.sshd.mu.Lock()
+		defer f.h.s.sshd.mu.Unlock()
+		n := 0
+		for sc := range f.h.s.sshd.conns {
+			if sc.deviceID == f.devID {
+				n++
+			}
+		}
+		return n
+	}
+	waitConns := func(want int) {
+		for deadline := time.Now().Add(5 * time.Second); devConns() != want; time.Sleep(10 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("device has %d live connections, want %d", devConns(), want)
+			}
+		}
+	}
+	waitConns(0)
 	c := f.client()
+	waitConns(1)
 	if err := f.h.s.store.RevokeDevice(f.devID, f.owner.ID, store.Now()); err != nil {
 		t.Fatal(err)
 	}
