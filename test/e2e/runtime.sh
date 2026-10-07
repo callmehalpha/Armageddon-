@@ -189,7 +189,7 @@ if command -v php >/dev/null && [ -x /usr/bin/php ]; then
     wait_ready "$WL"
     LTREE=$DATA/workspaces/$WL/tree LHOME=$DATA/workspaces/$WL/home
     LOWNER=$(stat -c %U "$LTREE")
-    runuser -u "$LOWNER" -- env HOME="$LHOME" composer create-project --no-install --no-scripts --no-interaction -q \
+    runuser -u "$LOWNER" -- env -C "$LHOME" HOME="$LHOME" composer create-project --no-install --no-scripts --no-interaction -q \
       laravel/laravel:^11.0 "$LHOME/skeleton" || fail "composer create-project"
     runuser -u "$LOWNER" -- cp -a "$LHOME/skeleton/." "$LTREE/"
     check "detected Laravel" test "$(api admin GET "/api/workspaces/$WL/runtime" | json 'd["plan"]["provider"]+"/"+d["plan"]["framework"]')" = php/laravel
