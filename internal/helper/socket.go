@@ -128,6 +128,30 @@ func (c *Socket) RepairDataOwnership(ctx context.Context) error {
 	return err
 }
 
+func (c *Socket) ComposeUp(ctx context.Context, wsID string, args ComposeArgs) (string, error) {
+	resp, err := c.call(ctx, &Request{Op: OpComposeUp, Workspace: wsID, Compose: &args})
+	if err != nil {
+		return "", err
+	}
+	return resp.Warning, nil
+}
+
+func (c *Socket) ComposeDown(ctx context.Context, wsID string) error {
+	_, err := c.call(ctx, &Request{Op: OpComposeDown, Workspace: wsID})
+	return err
+}
+
+func (c *Socket) ComposePs(ctx context.Context, wsID string) ([]ComposeService, error) {
+	resp, err := c.call(ctx, &Request{Op: OpComposePs, Workspace: wsID})
+	if err != nil {
+		return nil, err
+	}
+	if resp.Services == nil {
+		return []ComposeService{}, nil
+	}
+	return resp.Services, nil
+}
+
 // Spawn starts a workspace process. The connection stays open for the
 // process's lifetime: the helper streams its exit status on it, and kills
 // the process if the connection drops first.

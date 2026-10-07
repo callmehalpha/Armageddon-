@@ -59,6 +59,8 @@ func (s *Server) routes() http.Handler {
 	// Browser IDE: every method and subpath, proxied to the workspace's
 	// code-server after the same user + membership checks.
 	mux.HandleFunc("/api/workspaces/{id}/ide/", s.requireUser(s.member(s.handleIDE)))
+	// Runtimes, Compose and ports (M8)
+	s.runtimeRoutes(mux)
 	// Git-provider credentials and the SSH endpoint
 	mux.HandleFunc("GET /api/credentials", s.requireUser(s.handleListCredentials))
 	mux.HandleFunc("POST /api/credentials", s.requireUser(s.handleCreateCredential))

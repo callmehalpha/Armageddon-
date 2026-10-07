@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/creack/pty"
 )
@@ -22,12 +23,17 @@ import (
 type Dev struct {
 	DataDir string
 
-	mu    sync.Mutex
-	procs map[string]*devProc
+	mu      sync.Mutex
+	procs   map[string]*devProc
+	compose *composeRunner
 }
 
 // NewDev returns a dev helper for a data directory.
-func NewDev(dataDir string) *Dev { return &Dev{DataDir: dataDir, procs: map[string]*devProc{}} }
+func NewDev(dataDir string) *Dev {
+	d := &Dev{DataDir: dataDir, procs: map[string]*devProc{}}
+	d.compose = &composeRunner{projectDir: filepath.Join(dataDir, "compose"), config: d.composeConfig}
+	return d
+}
 
 func (d *Dev) Isolated() bool { return false }
 
@@ -218,6 +224,46 @@ func (d *Dev) SetWorkspaceLimits(ctx context.Context, wsID string, l Limits) err
 }
 
 func (d *Dev) RepairDataOwnership(ctx context.Context) error { return nil }
+
+func (d *Dev) composeRequest(op Op, wsID string, args *ComposeArgs) error {
+	return (&Request{Op: op, Workspace: wsID, Compose: args}).Validate()
+}
+
+func (d *Dev) ComposeUp(ctx context.Context, wsID string, args ComposeArgs) (string, error) {
+	if err := d.composeRequest(OpComposeUp, wsID, &args); err != nil {
+		return "", err
+	}
+	return d.compose.up(ctx, wsID, args)
+}
+
+func (d *Dev) ComposeDown(ctx context.Context, wsID string) error {
+	if err := d.composeRequest(OpComposeDown, wsID, nil); err != nil {
+		return err
+	}
+	return d.compose.down(ctx, wsID)
+}
+
+func (d *Dev) ComposePs(ctx context.Context, wsID string) ([]ComposeService, error) {
+	if err := d.composeRequest(OpComposePs, wsID, nil); err != nil {
+		return nil, err
+	}
+	return d.compose.ps(ctx, wsID)
+}
+
+// composeConfig runs `docker compose … config` in the workspace's tree as
+// the current user (dev mode has no workspace users).
+func (d *Dev) composeConfig(ctx context.Context, wsID string, argv []string) ([]byte, error) {
+	docker, err := dockerPath()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, docker, argv[1:]...)
+	cmd.Dir = filepath.Join(d.wsRoot(wsID), "tree")
+	cmd.Env = filterEnv([]string{"HOME=" + filepath.Join(d.wsRoot(wsID), "home")})
+	return composeConfigOutput(cmd)
+}
 
 func exitStatusOf(ps *os.ProcessState) ExitStatus {
 	if ps == nil {

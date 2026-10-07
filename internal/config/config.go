@@ -46,6 +46,7 @@ type Server struct {
 
 	CodeServer CodeServer `json:"code_server"`
 	SSH        SSH        `json:"ssh"`
+	Runtimes   Runtimes   `json:"runtimes"`
 }
 
 // TStale and THandoff return the lease timers with their defaults applied.
@@ -71,6 +72,18 @@ type CodeServer struct {
 	// IdleTimeoutMin stops an instance with no traffic for this long
 	// (default 30).
 	IdleTimeoutMin int `json:"idle_timeout_min,omitempty"`
+}
+
+// Runtimes configures the runtime providers (plan M8). Empty values use the
+// upstream locations.
+type Runtimes struct {
+	// NodeMirror is the base URL of the Node.js distribution (index.json,
+	// v<version>/SHASUMS256.txt and the tarballs), default
+	// https://nodejs.org/dist.
+	NodeMirror string `json:"node_mirror,omitempty"`
+	// ComposerURL is where composer.phar is fetched when the server has no
+	// composer; <url>.sha256 holds its checksum.
+	ComposerURL string `json:"composer_url,omitempty"`
 }
 
 // SSH configures the embedded SSH endpoint (plan M4.4). Off by default until

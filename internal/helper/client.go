@@ -28,6 +28,14 @@ type Client interface {
 	SetWorkspaceLimits(ctx context.Context, wsID string, l Limits) error
 	// RepairDataOwnership upgrades an MVP (root-owned) data directory.
 	RepairDataOwnership(ctx context.Context) error
+	// ComposeUp checks the workspace's Compose file and starts it as the
+	// workspace's project (compose.go). The warning lists rewrites.
+	ComposeUp(ctx context.Context, wsID string, args ComposeArgs) (warning string, err error)
+	// ComposeDown stops and removes the workspace's project; its volumes
+	// are kept.
+	ComposeDown(ctx context.Context, wsID string) error
+	// ComposePs lists the workspace project's services.
+	ComposePs(ctx context.Context, wsID string) ([]ComposeService, error)
 }
 
 // SpawnSpec describes a workspace process. For pty-shell the helper opens

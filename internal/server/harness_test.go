@@ -37,6 +37,11 @@ func TestMain(m *testing.M) {
 				os.Exit(1)
 			}
 			os.Exit(0)
+		case "hook":
+			if len(os.Args) > 2 {
+				os.Exit(HookMain(os.Args[2], os.Args[3:]))
+			}
+			os.Exit(2)
 		case "sftp-server":
 			if err := SFTPServerMain(); err != nil {
 				os.Exit(1)

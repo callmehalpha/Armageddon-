@@ -1,6 +1,6 @@
 # Known limitations, and how to resolve them
 
-Status: **2026-10-05, living document.** It now includes the findings of all five post-MVP phases: PRs #7, #9, #10, #11 and #8.
+Status: **2026-10-07, living document.** It now includes the findings of all five post-MVP phases (PRs #7, #9, #10, #11 and #8) and of M8, runtimes and Docker.
 
 There are three kinds of limitation, and they need different responses:
 
@@ -104,6 +104,7 @@ These live on the phase branches until they merge. Run each as root on a VM:
 | `phase4/install-ops` | `sudo test/e2e/ops.sh /usr/local/bin/armageddon` | TLS pinning, doctor, backup and restore |
 | `phase4/install-ops` | `test/install/container.sh ubuntu:24.04 …` | Real systemd install, update, rollback (needs Docker) |
 | `phase5/remote-ide` | `sudo test/e2e/ide.sh /usr/local/bin/armageddon ./fake-code-server` | code-server proxy, SSH, credentials, escapes from a second workspace (needs `openssh-client`; helper as root, server as `armageddon`) |
+| M8 (runtimes and Docker) | `sudo test/e2e/runtime.sh /usr/local/bin/armageddon` | Next.js, PHP and Laravel runtimes, the port proxy, Compose refusals, Postgres and Redis (needs network; PHP, Composer and a running Docker daemon for their parts) |
 
 ---
 
@@ -148,6 +149,12 @@ These live on the phase branches until they merge. Run each as root on a VM:
 | B18 | **The encryption scheme for stored Git credentials differs:** AES-256-GCM in the code, XChaCha20-Poly1305 in contract §7.5 | None needed; both are sound | Align the contract or the code |
 | B19 | **Releases are unsigned** until a signing key is configured (C2) | `install.sh` and `server update` refuse them unless given `--allow-unsigned` | Run `armageddon release keygen` and set the `MINISIGN_SECRET_KEY` and `MINISIGN_PASSWORD` secrets |
 | B20 | **Docker Compose:** workspace users are recreated in creation order on each container start, so their IDs only match the volume while that order is stable | Don't delete workspace users by hand inside the container | Persist the uid map on the volume |
+| B21 | **Workspace ports are served on the Armageddon origin** (M8.6), like the IDE (B13): JavaScript of an app in the workspace runs with the viewer's Armageddon session. Apps also see a path prefix (`/api/workspaces/<id>/ports/<port>/`), so absolute asset URLs such as Next.js's `/_next/…` don't load through the proxy | Trusted members only. For full apps, forward the port over SSH (`ssh -L 3000:localhost:3000 ws-<slug>@server`) or set the framework's base path | A separate origin per port (wildcard subdomain plus a one-time ticket), with B13 |
+| B22 | **Dev servers that listen on all interfaces** (Next.js does by default) are reachable from the network directly, without Armageddon's authentication, if the host firewall lets the port through. Compose ports are always bound to 127.0.0.1 | Open only 80/443 and SSH in the host firewall | A per-workspace network namespace (with B14) |
+| B23 | **Compose is deliberately narrow:** bind mounts and image builds are refused (both would be read by root and are open to a symlink race), as are host namespaces, devices, extra capabilities and external volumes or networks; containers have only the resource limits the file sets | Use named volumes and prebuilt images (for example an image with your seed SQL built elsewhere) | Bind mounts through a helper-held directory descriptor; builds in a rootless builder |
+| B24 | **Runtime process state lives in the server's memory:** a server restart ends the install and the dev server (they are helper children) and forgets their output. Compose services keep running | `armageddon runtime start` again after a restart | Persist the desired state (`runtime_instances`) and restart on boot |
+| B25 | **PHP comes from the server:** a version the server lacks is reported, not installed. Bun is not supported (npm is used instead). A Laravel app's asset build (`npm run dev`) is not started | Install the PHP version on the server; run `npm run dev` in the terminal | Per-workspace PHP (static builds) if there is demand |
+| B26 | **`work remote --restart` restarts only the dev server** that the handoff stopped, during this server process's lifetime; an interrupted install is not repeated | `armageddon runtime install` again | With B24 |
 
 ---
 
@@ -188,6 +195,11 @@ These live on the phase branches until they merge. Run each as root on a VM:
   - The code-server pin `4.96.4` in `deploy/code-server.json` has its sha256 recorded at release time. It differs from Phase 5's pin of 4.118.0 (`internal/components`); they are not aligned yet.
   - The helper unit doesn't restrict its network, because that would also cut off the workspace processes it spawns.
   - Fixed an MVP bug: empty workspaces failed `git fsck`. `doctor --repair` fixes existing ones.
+- **M8 (runtimes and Docker):**
+  - Verified here: the providers' unit tests (version ranges, detection, a checked Node download from a fake mirror, a tampered tarball refused, Laravel install steps), a real Node.js 20 download from nodejs.org running a dev server, the API end to end with PHP's built-in server (install, start, health, the proxy refusing anonymous and non-member callers, a handoff stopping the dev server, the restart), and the Compose checks against `docker compose config` output.
+  - Not verifiable here: `docker compose up` (no Docker daemon in the sandbox, A3) and a full Laravel install (GitHub downloads of Composer packages are blocked). Both run in CI (`e2e-runtime`).
+  - The root-only acceptance script `test/e2e/runtime.sh` was not run in the sandbox; CI runs it.
+  - The helper gained `ComposeUp/Down/Ps` (contract §2.5, ⟨P-22⟩). There is no `ConfigurePortProxy` (⟨P-24⟩).
 - **Phase 5 (remote IDE, #8):**
   - See B13–B16 and B18.
   - Integrated with the privilege split: code-server, SSH sessions and SFTP are started by the helper as the workspace user (`code-server`, `ssh-session` and, for SSH with a terminal, `pty-shell`). `ide.sh` runs the helper as root and the server as `armageddon`, and attacks the new sockets from a second workspace.

@@ -28,10 +28,12 @@ func (o *serverSeat) GitOpInProgress() string {
 // workspace's dev processes (decision Q1).
 func (o *serverSeat) Quiesce(reason string) {
 	n := o.s.sessions.CloseAll(o.rt.id, reason)
+	// Dev processes stopped here are restarted by `work remote --restart`.
+	dev := o.s.procs.markHandoff(o.rt.id)
 	o.rt.seatMu.Lock()
 	stopped := o.s.stopWorkspaceProcesses(o.rt.id, 3*time.Second)
 	o.rt.seatMu.Unlock()
-	o.s.event(o.rt.id, "server", "", "seat.quiesced", map[string]any{"sessions_closed": n, "processes_stopped": stopped, "reason": reason})
+	o.s.event(o.rt.id, "server", "", "seat.quiesced", map[string]any{"sessions_closed": n, "processes_stopped": stopped, "dev_processes": dev, "reason": reason})
 }
 
 func (o *serverSeat) Flush() error {

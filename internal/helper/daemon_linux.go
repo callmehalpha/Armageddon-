@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
@@ -34,6 +35,8 @@ type Daemon struct {
 	procs map[string]*daemonProc
 
 	cg *cgroups
+
+	compose *composeRunner
 }
 
 type daemonProc struct {
@@ -67,6 +70,10 @@ func NewDaemon(dataDir, socket, serverUser string) (*Daemon, error) {
 	d := &Daemon{DataDir: filepath.Clean(abs), Socket: socket, ServerUID: uint32(uid), ServerGID: uint32(gid), Exe: exe,
 		procs: map[string]*daemonProc{}}
 	d.cg = newCgroups()
+	// Compose's project directory: root-only, outside the run directory
+	// (which the server user owns).
+	d.compose = &composeRunner{projectDir: filepath.Join(filepath.Dir(filepath.Dir(filepath.Clean(socket))), "armageddon-helper", "compose"),
+		config: d.composeConfig}
 	if d.cg.warning != "" {
 		log.Printf("WARNING: %s", d.cg.warning)
 	}
@@ -169,6 +176,8 @@ func (d *Daemon) handle(conn *net.UnixConn) {
 		err = d.setLimits(req.Workspace, *req.Limits)
 	case OpRepairDataOwnership:
 		err = d.repairOwnership()
+	case OpComposeUp, OpComposeDown, OpComposePs:
+		resp, err = d.composeOp(ctx, req)
 	default:
 		err = fmt.Errorf("unknown operation %q", req.Op) // unreachable: DecodeRequest checks
 	}
@@ -680,4 +689,69 @@ func NNPMain(args []string) int {
 	err := unix.Exec(args[1], args[2:], os.Environ())
 	fmt.Fprintf(os.Stderr, "armageddon: exec %s: %v\n", args[1], err)
 	return 127
+}
+
+// ---- Docker Compose (plan M8.4; see compose.go) ----
+
+func (d *Daemon) composeOp(ctx context.Context, req *Request) (*Response, error) {
+	if _, err := d.lookupUser(req.Workspace); err != nil {
+		return nil, err
+	}
+	if err := ensureRootDir(d.compose.projectDir); err != nil {
+		return nil, err
+	}
+	switch req.Op {
+	case OpComposeUp:
+		w, err := d.compose.up(ctx, req.Workspace, *req.Compose)
+		return &Response{Warning: w}, err
+	case OpComposeDown:
+		return nil, d.compose.down(ctx, req.Workspace)
+	}
+	svcs, err := d.compose.ps(ctx, req.Workspace)
+	return &Response{Services: svcs}, err
+}
+
+// ensureRootDir creates dir (and its parent) as root-only directories and
+// checks that neither is a symlink or writable by anyone else.
+func ensureRootDir(dir string) error {
+	for _, p := range []string{filepath.Dir(dir), dir} {
+		if err := os.Mkdir(p, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		var st unix.Stat_t
+		if err := unix.Lstat(p, &st); err != nil {
+			return err
+		}
+		if st.Mode&unix.S_IFMT != unix.S_IFDIR || st.Uid != 0 || st.Mode&0o077 != 0 {
+			return fmt.Errorf("%s must be a root-owned directory with mode 0700: refused", p)
+		}
+	}
+	return nil
+}
+
+// composeConfig runs `docker compose … config` as the workspace user, with
+// no_new_privs, in the workspace's tree/: every file the Compose project
+// refers to is read with the workspace's permissions. Its output is only
+// data for NormalizeCompose.
+func (d *Daemon) composeConfig(ctx context.Context, wsID string, argv []string) ([]byte, error) {
+	u, err := d.lookupUser(wsID)
+	if err != nil {
+		return nil, err
+	}
+	tree := filepath.Join(d.wsRoot(wsID), "tree")
+	if err := d.checkCwd(wsID, tree); err != nil {
+		return nil, err
+	}
+	docker, err := dockerPath()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, d.Exe, append([]string{"helper-nnp", "--", docker}, argv...)...)
+	cmd.Dir = tree
+	cmd.Env = []string{"PATH=" + SafePath, "HOME=" + filepath.Join(d.wsRoot(wsID), "home"), "USER=" + u.name, "LOGNAME=" + u.name}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: u.uid, Gid: u.gid, Groups: []uint32{}}, Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	return composeConfigOutput(cmd)
 }
