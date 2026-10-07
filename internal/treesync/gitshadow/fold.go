@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
@@ -50,8 +51,10 @@ func probeInsensitive(dir string) bool {
 	if v, ok := probeCache.Load(dir); ok {
 		return v.(bool)
 	}
-	const prefix = ".armageddon-tmp-probe-"
-	p := filepath.Join(dir, prefix+"Aé") // NFC é
+	// A unique name: a probe left behind by a crash must not make the
+	// filesystem read as sensitive (O_EXCL fails on an existing name).
+	prefix := fmt.Sprintf(".armageddon-tmp-probe-%d-%d-", os.Getpid(), rand.Int63())
+	p := filepath.Join(dir, prefix+"A\u00e9") // NFC é
 	f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return false
@@ -59,7 +62,7 @@ func probeInsensitive(dir string) bool {
 	f.Close()
 	defer os.Remove(p)
 	insensitive := false
-	for _, alt := range []string{prefix + "aé", prefix + "Aé"} { // case, NFD
+	for _, alt := range []string{prefix + "a\u00e9", prefix + "Ae\u0301"} { // case, NFD
 		if _, err := os.Lstat(filepath.Join(dir, alt)); err == nil {
 			insensitive = true
 		}
