@@ -168,6 +168,42 @@ get_release() {
   verify_release
 }
 
+# openssl_ed25519: whether openssl can verify Ed25519 signatures over BLAKE2b.
+openssl_ed25519() {
+  command -v openssl >/dev/null 2>&1 && command -v base64 >/dev/null 2>&1 &&
+    printf x | openssl dgst -blake2b512 -binary >/dev/null 2>&1 &&
+    openssl list -public-key-algorithms 2>/dev/null | grep -qi ed25519
+}
+
+# minisign_openssl PUBKEY FILE SIGFILE verifies a minisign signature with
+# openssl: the key ids must match, the signature must cover FILE ("Ed", what
+# the release pipeline makes) or BLAKE2b-512(FILE) ("ED", minisign -H), and
+# the global signature must cover the signature and its trusted comment.
+minisign_openssl() {
+  t=$(mktemp -d) || return 1
+  # SubjectPublicKeyInfo DER prefix for an Ed25519 key.
+  printf '\060\052\060\005\006\003\053\145\160\003\041\000' >"$t/der"
+  printf '%s' "$1" | base64 -d >"$t/pk" 2>/dev/null &&
+    [ "$(wc -c <"$t/pk")" -eq 42 ] &&
+    [ "$(head -c 2 "$t/pk")" = Ed ] &&
+    sed -n 2p "$3" | base64 -d >"$t/sig" 2>/dev/null &&
+    [ "$(wc -c <"$t/sig")" -eq 74 ] &&
+    alg=$(head -c 2 "$t/sig") && { [ "$alg" = Ed ] || [ "$alg" = ED ]; } &&
+    [ "$(tail -c +3 "$t/pk" | head -c 8 | od -An -tx1)" = "$(tail -c +3 "$t/sig" | head -c 8 | od -An -tx1)" ] &&
+    tail -c 32 "$t/pk" >>"$t/der" &&
+    openssl pkey -pubin -inform DER -in "$t/der" -out "$t/pub.pem" 2>/dev/null &&
+    tail -c 64 "$t/sig" >"$t/s" &&
+    if [ "$alg" = ED ]; then openssl dgst -blake2b512 -binary "$2" >"$t/h"; else cp "$2" "$t/h"; fi &&
+    openssl pkeyutl -verify -pubin -inkey "$t/pub.pem" -rawin -in "$t/h" -sigfile "$t/s" >/dev/null 2>&1 &&
+    sed -n 3p "$3" | grep -q '^trusted comment: ' &&
+    sed -n 4p "$3" | base64 -d >"$t/gs" 2>/dev/null &&
+    { cat "$t/s"; sed -n 3p "$3" | sed 's/^trusted comment: //' | tr -d '\n'; } >"$t/g" &&
+    openssl pkeyutl -verify -pubin -inkey "$t/pub.pem" -rawin -in "$t/g" -sigfile "$t/gs" >/dev/null 2>&1
+  rc=$?
+  rm -rf "$t"
+  return $rc
+}
+
 verify_release() {
   # Every artefact against the manifest's sha256 first.
   for f in "$BIN_NAME" armageddon.service armageddon-helper.service armageddon-single.service; do
@@ -190,13 +226,13 @@ verify_release() {
   if command -v minisign >/dev/null 2>&1; then
     minisign -Vq -P "$ARMAGEDDON_PUBKEY" -m "$STAGE/manifest.json" -x "$STAGE/manifest.json.minisig" ||
       die "manifest signature is INVALID: refusing to install"
-  else
-    # Without the minisign tool, the downloaded binary checks the signature.
-    # Its checksum already matched the manifest, so this catches a manifest
-    # signed by the wrong key; install minisign for an independent check.
-    chmod 0755 "$STAGE/$BIN_NAME"
-    "$STAGE/$BIN_NAME" release verify "$STAGE/manifest.json" "$STAGE/manifest.json.minisig" --pubkey "$ARMAGEDDON_PUBKEY" --dir "$STAGE" >/dev/null ||
+  elif openssl_ed25519; then
+    # Without the minisign tool, openssl checks the same signature. The
+    # downloaded binary never verifies itself (security review M9.2).
+    minisign_openssl "$ARMAGEDDON_PUBKEY" "$STAGE/manifest.json" "$STAGE/manifest.json.minisig" ||
       die "manifest signature is INVALID: refusing to install"
+  else
+    die "cannot check the release signature: install minisign, or OpenSSL 1.1.1 or newer (--allow-unsigned skips the check)"
   fi
   say "release $VERSION: signature and checksums verified"
 }

@@ -103,6 +103,13 @@ func (s *Store) CreateOneTimeToken(hash, kind, role, createdBy string, expires i
 	return err
 }
 
+// OneTimeTokenValid reports whether an unused, unexpired token exists,
+// without consuming it (a cheap check before expensive work).
+func (s *Store) OneTimeTokenValid(hash, kind string, now int64) bool {
+	var one int
+	return s.db.QueryRow(`SELECT 1 FROM one_time_tokens WHERE token_hash = ? AND kind = ? AND consumed_at IS NULL AND expires_at > ?`, hash, kind, now).Scan(&one) == nil
+}
+
 // ConsumeOneTimeToken atomically marks a valid token used and returns its role.
 func (s *Store) ConsumeOneTimeToken(tx *sql.Tx, hash, kind string, now int64) (string, error) {
 	var role string

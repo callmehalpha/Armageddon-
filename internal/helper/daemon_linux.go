@@ -107,11 +107,9 @@ func (d *Daemon) Serve(ctx context.Context) error {
 		return err
 	}
 	l.SetUnlinkOnClose(true)
-	if err := os.Chown(d.Socket, int(d.ServerUID), int(d.ServerGID)); err != nil {
-		l.Close()
-		return err
-	}
-	if err := os.Chmod(d.Socket, 0o600); err != nil {
+	// The umask made it 0600. Lchown, not Chown: never follow a symlink
+	// swapped in for the socket (M9.2 security review, finding 3).
+	if err := os.Lchown(d.Socket, int(d.ServerUID), int(d.ServerGID)); err != nil {
 		l.Close()
 		return err
 	}
@@ -434,6 +432,13 @@ func (d *Daemon) repairDir(dirfd int, depth int) (int, error) {
 			continue
 		}
 		owner := st.Uid
+		// A root-owned file with another hard link may be a link to a
+		// file outside the data directory (where fs.protected_hardlinks
+		// is off): never hand it over (M9.2 security review, finding 11).
+		if owner == 0 && st.Mode&unix.S_IFMT != unix.S_IFDIR && st.Nlink > 1 {
+			log.Printf("helper: data directory upgrade: skipping %s (root-owned, %d hard links)", name, st.Nlink)
+			continue
+		}
 		if owner == 0 {
 			if err := unix.Fchownat(dirfd, name, int(d.ServerUID), int(d.ServerGID), unix.AT_SYMLINK_NOFOLLOW); err != nil {
 				return n, fmt.Errorf("chown %s: %w", name, err)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -71,7 +72,7 @@ func (s *Server) serveHookConn(rt *runtime, conn *net.UnixConn) {
 		return
 	}
 	conn.SetDeadline(time.Now().Add(10 * time.Second))
-	line, err := bufio.NewReader(conn).ReadBytes('\n')
+	line, err := bufio.NewReader(io.LimitReader(conn, 16<<20)).ReadBytes('\n')
 	if err != nil && len(line) == 0 {
 		return
 	}

@@ -64,7 +64,7 @@ func (u *Updater) Update(ctx context.Context) (*Step, error) {
 	step := &Step{From: from, To: to, At: now()}
 	if _, err := os.Stat(u.dbPath()); err == nil {
 		dir := filepath.Join(u.Layout.DataDir, "backups")
-		if err := os.MkdirAll(dir, 0o700); err != nil {
+		if err := realDir(dir); err != nil {
 			return nil, err
 		}
 		step.DBBackup = filepath.Join(dir, fmt.Sprintf("pre-update-%s-to-%s-%s.db", from, to, time.Now().UTC().Format("20060102T150405Z")))
@@ -245,8 +245,13 @@ func RestoreDB(backupPath, dbPath string) error {
 		return err
 	}
 	defer in.Close()
+	// The data directory belongs to the server user: never follow a link
+	// planted at the temporary name (M9.2 security review, finding 4).
 	tmp := dbPath + ".restore.tmp"
-	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return err
 	}
@@ -258,14 +263,30 @@ func RestoreDB(backupPath, dbPath string) error {
 		out.Close()
 		return err
 	}
-	out.Close()
 	if uid >= 0 && os.Geteuid() == 0 {
-		os.Chown(tmp, uid, gid)
+		out.Chown(uid, gid)
 	}
+	out.Close()
 	for _, suffix := range []string{"-wal", "-shm"} {
 		if err := os.Remove(dbPath + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
 	return os.Rename(tmp, dbPath)
+}
+
+// realDir creates dir (0700) if needed and checks that it is a directory,
+// not a symbolic link the server user planted to redirect a root write.
+func realDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("%s is not a directory (a symbolic link?): refusing to write a backup there", dir)
+	}
+	return nil
 }

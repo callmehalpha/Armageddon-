@@ -101,6 +101,8 @@ type wsPort struct {
 // "" if the socket cannot be reached over loopback.
 func reachableIP(ip net.IP) string {
 	switch {
+	case ip.IsUnspecified() && ip.To4() == nil:
+		return "::1" // [::] may be IPV6_V6ONLY, which 127.0.0.1 would miss
 	case ip.IsUnspecified():
 		return "127.0.0.1"
 	case ip.IsLoopback():

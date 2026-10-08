@@ -156,10 +156,12 @@ func untar(r io.Reader, dir string) (int, error) {
 		if err != nil {
 			return n, err
 		}
-		p := filepath.Join(dir, filepath.FromSlash(h.Name))
-		if !strings.HasPrefix(p, filepath.Clean(dir)+string(filepath.Separator)) {
-			return n, fmt.Errorf("bad path %q in archive", h.Name)
+		// The archive comes from a quarantine another seat uploaded: no
+		// path into a .git directory or through a symlink it just created.
+		if err := gitshadow.CheckPath(dir, strings.TrimSuffix(h.Name, "/")); err != nil {
+			return n, fmt.Errorf("bad path in archive: %w", err)
 		}
+		p := filepath.Join(dir, filepath.FromSlash(h.Name))
 		switch h.Typeflag {
 		case tar.TypeDir:
 			os.MkdirAll(p, 0o755)
@@ -298,6 +300,9 @@ func merge3(sh *gitshadow.Shadow, dir, baseTree, theirsTree, label string) (*mer
 		}
 		if tMode == "000000" {
 			tOid = ""
+		}
+		if err := gitshadow.CheckPath(dir, path); err != nil {
+			return nil, err
 		}
 		disk := filepath.Join(dir, filepath.FromSlash(path))
 		oMode, oOid, err := gitshadow.DiskBlob(disk)
