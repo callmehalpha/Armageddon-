@@ -107,3 +107,7 @@ internal/sysuser/        compatibility alias for helper.Account (MVP name)
 test/e2e/mvp.sh          acceptance test
 docs/design/             design contract, implementation plan, prototype results
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
