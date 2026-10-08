@@ -221,6 +221,10 @@ type CaptureStats struct {
 	Oversize       []string // not captured: larger than the size policy (F17)
 }
 
+// scopedAddMax is the most changed paths CaptureTree adds by name; above
+// it, matching every index entry against the list costs more than a walk.
+const scopedAddMax = 2000
+
 // CaptureTree captures the working tree into the shadow and returns the tree
 // oid for /worktree plus the list of non-ignored empty directories.
 func (s *Shadow) CaptureTree() (string, CaptureStats, error) {
@@ -238,11 +242,27 @@ func (s *Shadow) CaptureTree() (string, CaptureStats, error) {
 		base = strings.TrimSpace(string(b))
 	}
 	var added []byte
-	if len(pol.big) == 0 {
+	switch {
+	case pol.active && len(pol.changed) <= scopedAddMax:
+		// The scan already listed every changed path (NUL-safe), so add
+		// only those instead of walking the tree again (M9.3), and nothing
+		// at all when nothing changed. Big files are not in the list, so
+		// Git never reads them.
+		if len(pol.changed) == 0 {
+			break
+		}
+		specs := make([]string, len(pol.changed))
+		for i, p := range pol.changed {
+			specs[i] = ":(literal)" + p
+		}
+		if added, err = s.Git([]byte(strings.Join(specs, "\x00")), "add", "-A", "-v", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
+			return "", st, err
+		}
+	case len(pol.big) == 0:
 		if added, err = s.Git(nil, "add", "-A", "-v", "--", "."); err != nil {
 			return "", st, err
 		}
-	} else {
+	default:
 		// Excluded by pathspec, so Git never reads them: a tracked file
 		// that grew past the limit keeps its last captured version.
 		specs := []string{"."}
@@ -267,6 +287,16 @@ func (s *Shadow) CaptureTree() (string, CaptureStats, error) {
 	if err := s.dropFoldedStale(); err != nil {
 		return "", st, err
 	}
+	// The empty-directory listing (below) runs alongside the preserve
+	// steps: adding preserved files changes which directories Git reports,
+	// but not which empty leaves emptyLeaves finds under them on disk.
+	var emptyOut []byte
+	var emptyErr error
+	emptyDone := make(chan struct{})
+	go func() {
+		defer close(emptyDone)
+		emptyOut, emptyErr = s.Git(nil, "ls-files", "-z", "-o", "--exclude-standard", "--directory")
+	}()
 	// Preserve: ignored-but-wanted files (.env*). --directory collapses
 	// ignored directories so node_modules is not descended into.
 	if len(s.Preserve) > 0 {
@@ -291,13 +321,15 @@ func (s *Shadow) CaptureTree() (string, CaptureStats, error) {
 			st.PreservedAdded = len(add)
 			if _, err := s.Git([]byte(strings.Join(add, "\x00")), "--literal-pathspecs", "add", "-f",
 				"--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
+				<-emptyDone
 				return "", st, err
 			}
 		}
 	}
 	// After add -A the only remaining untracked, non-ignored entries are
 	// empty directories.
-	out, err := s.Git(nil, "ls-files", "-z", "-o", "--exclude-standard", "--directory")
+	<-emptyDone
+	out, err := emptyOut, emptyErr
 	if err != nil {
 		return "", st, err
 	}

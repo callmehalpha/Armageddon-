@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // DefaultMaxFileSize is the class X size limit of §6.6: larger files are
@@ -97,33 +98,70 @@ type sizePolicy struct {
 	limit   int64
 	big     []string        // over the limit: excluded from this capture
 	scanned map[string]bool // every path the scan looked at
+	changed []string        // every changed path except big: what to add
 }
 
 // sizeScan lists the changed or new files (modified per the index's stat
 // cache, or untracked and not ignored) larger than the size limit, so
 // capture can leave them out without reading them.
 func (s *Shadow) sizeScan() (sizePolicy, error) {
-	pol := sizePolicy{limit: s.maxFileSize(), scanned: map[string]bool{}}
+	// The policy, the changed tracked files and the untracked files come
+	// from three Git processes run at once: this scan runs before every
+	// capture, and each process mostly waits on reading the index or the
+	// directory tree (M9.3: about 150 ms less at 50k files than one
+	// `ls-files -m -o`, which stats every entry on one thread).
+	if s.MaxFileSize < 0 {
+		return sizePolicy{limit: -1, scanned: map[string]bool{}}, nil
+	}
+	var (
+		wg              sync.WaitGroup
+		limit           int64
+		mod, untracked  []byte
+		errMod, errUntr error
+	)
+	wg.Add(3)
+	go func() { defer wg.Done(); limit = s.maxFileSize() }()
+	go func() { defer wg.Done(); mod, errMod = s.Git(nil, "diff-files", "--name-only", "-z") }()
+	go func() {
+		defer wg.Done()
+		untracked, errUntr = s.Git(nil, "ls-files", "-z", "-o", "--exclude-standard")
+	}()
+	wg.Wait()
+	pol := sizePolicy{limit: limit, scanned: map[string]bool{}}
 	if pol.limit < 0 {
 		return pol, nil
 	}
 	pol.active = true
-	out, err := s.Git(nil, "ls-files", "-z", "-m", "-o", "--exclude-standard")
-	if err != nil {
-		return pol, err
+	if errMod != nil {
+		return pol, errMod
+	}
+	if errUntr != nil {
+		return pol, errUntr
 	}
 	var paths []string
-	for _, p := range splitZ(out) {
-		if !pol.scanned[p] && !s.sizeExempt[p] { // -m and -o can both list a path
-			pol.scanned[p] = true
+	for _, p := range append(splitZ(mod), splitZ(untracked)...) {
+		if pol.scanned[p] { // a path can be listed twice
+			continue
+		}
+		pol.scanned[p] = true
+		if s.sizeExempt[p] {
+			pol.changed = append(pol.changed, p)
+		} else {
 			paths = append(paths, p)
 		}
 	}
-	err = s.regularSizes(paths, func(p string, size int64) {
+	big := map[string]bool{}
+	err := s.regularSizes(paths, func(p string, size int64) {
 		if size > pol.limit {
 			pol.big = append(pol.big, p)
+			big[p] = true
 		}
 	})
+	for _, p := range paths {
+		if !big[p] {
+			pol.changed = append(pol.changed, p)
+		}
+	}
 	sort.Strings(pol.big)
 	return pol, err
 }
