@@ -10,10 +10,14 @@ import (
 
 // The operation table is exactly the v0.1 set of contract §2.5, plus the
 // data-directory upgrade operation (documented in the contract with the
-// privilege split). ComposeUp/Down/Ps and ConfigurePortProxy are later
-// phases. Adding an operation must be a deliberate contract change.
+// privilege split) and ComposeUp/Down/Ps (M8.4). ConfigurePortProxy is not
+// needed: the port proxy runs in the server (M8.6). Adding an operation
+// must be a deliberate contract change.
 func TestOperationTableIsContractSet(t *testing.T) {
 	want := []Op{
+		"ComposeDown",
+		"ComposePs",
+		"ComposeUp",
 		"CreateWorkspaceUser",
 		"DeleteWorkspaceUser",
 		"PrepareWorkspaceDirs",
@@ -192,6 +196,8 @@ func FuzzDecodeRequest(f *testing.F) {
 	f.Add([]byte(`{"op":"SetWorkspaceLimits","workspace":"` + ws + `","limits":{"pids":5}}`))
 	f.Add([]byte(`{"op":"RepairDataOwnership"}`))
 	f.Add([]byte(`{"op":"SpawnInWorkspace","spawn":null}`))
+	f.Add([]byte(`{"op":"ComposeUp","workspace":"` + ws + `","compose":{"file":"compose.yaml"}}`))
+	f.Add([]byte(`{"op":"ComposePs","workspace":"` + ws + `"}`))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		req, err := DecodeRequest(data)
 		if err != nil {

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/callmehalpha/Armageddon-/internal/runtimes"
 	"github.com/callmehalpha/Armageddon-/internal/treesync/gitshadow"
 )
 
@@ -24,6 +25,9 @@ const zeroOid = "0000000000000000000000000000000000000000"
 // clients by server-injected uploadpack/receive hideRefs.
 func HookMain(name string, args []string) int {
 	switch name {
+	case "runtime":
+		// Runtime providers, run as the workspace user (plan M8).
+		return runtimes.Main(args)
 	case "post-receive":
 		// Pushed updates: by now the objects have left quarantine and the
 		// old tips are still in the object store (gc.auto=0).

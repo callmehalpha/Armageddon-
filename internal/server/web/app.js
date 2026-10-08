@@ -147,6 +147,7 @@ async function workspacePage(id) {
     h("p", {}, h("strong", {}, w.lease.holder_name), " is writing this workspace, so the server seat is read-only: ",
       "the browser terminal is closed and the server's dev processes are stopped. Its checkpoints still arrive here."));
   const cps = h("tbody"), evs = h("tbody"), reps = h("div");
+  const runBox = h("div", { class: "card", id: "runtime" }, h("h2", {}, "Runtime and services"), h("p", { class: "muted" }, "Looking at the workspace…"));
   const cloneCmd = "armageddon clone " + w.id;
   render(
     h("h1", {}, w.name, " ", h("span", { class: "pill ready" }, "ready")),
@@ -162,7 +163,69 @@ async function workspacePage(id) {
         h("p", { class: "muted" }, "The replica follows this workspace and survives on its own if this server is lost."),
         reps,
         h("h2", {}, "Git remote"), h("pre", { class: "cmd" }, w.git_url))),
+    runBox,
     h("div", { class: "card" }, h("h2", {}, "Activity"), h("table", {}, evs)));
+
+  // Runtime, dev server, Compose services and ports (M8). Polled less often
+  // than the rest: the plan runs as the workspace user on every request.
+  const runErr = h("div", { class: "err" });
+  let busy = false;
+  const act = (label, fn) => {
+    const b = h("button", { style: "margin-right:8px", onclick: async () => {
+      busy = true; b.disabled = true; runErr.textContent = label + "…";
+      try { await fn(); runErr.textContent = ""; } catch (x) { runErr.textContent = x.message; }
+      busy = false; refreshRuntime();
+    } }, label);
+    b.disabled = busy;
+    return b;
+  };
+  async function refreshRuntime() {
+    let st, compose = null;
+    try { st = await api("GET", `/api/workspaces/${id}/runtime`); } catch (x) { return; }
+    try { compose = await api("GET", `/api/workspaces/${id}/compose`); } catch (x) { compose = null; }
+    const p = st.plan, procs = st.processes || [], ports = st.ports || [];
+    const proc = (n) => procs.find(x => x.name === n);
+    const dev = proc("dev"), inst = proc("install");
+    const lines = [];
+    if (p) {
+      const tc = p.toolchain;
+      lines.push(h("p", {}, h("strong", {}, p.provider + (p.framework ? " · " + p.framework : "")), " · ",
+        `${tc.name} ${tc.version} (${{ system: "the server's", workspace: "installed in the workspace", install: "not installed yet", missing: "missing" }[tc.source]})`,
+        p.package_manager ? ` · ${p.package_manager}` : "", p.start ? h("span", { class: "muted mono" }, " · " + p.start.join(" ")) : ""));
+      for (const n of p.notes || []) lines.push(h("p", { class: "muted" }, "Note: " + n));
+    } else {
+      lines.push(h("p", { class: "muted" }, st.plan_error || "No runtime detected."));
+    }
+    const state = (x) => !x ? "" : x.state === "running" ? (x.health ? `running · ${x.health}` : "running")
+      : x.stopped_by ? `stopped by ${x.stopped_by}` : x.exit_code != null ? `exited ${x.exit_code}` : x.state;
+    if (p && st.server_holds_lease) {
+      lines.push(h("div", { class: "row" },
+        inst && inst.state === "running" ? h("span", { class: "muted" }, "Installing…") : act("Install", () => api("POST", `/api/workspaces/${id}/runtime/install`)),
+        dev && dev.state === "running" ? act("Stop dev server", () => api("POST", `/api/workspaces/${id}/runtime/stop`, { name: "dev" }))
+          : act("Start dev server", () => api("POST", `/api/workspaces/${id}/runtime/start`, {})),
+        h("span", { class: "muted" }, [inst ? "install: " + state(inst) : "", dev ? " dev: " + state(dev) : ""].join(" "))));
+    } else if (!st.server_holds_lease) {
+      lines.push(h("p", { class: "muted" }, "Dev processes on the server are stopped while a device writes this workspace."));
+    }
+    if (ports.length) {
+      lines.push(h("h2", {}, "Ports"), h("table", {}, h("tbody", {}, ...ports.map(x => h("tr", {},
+        h("td", {}, h("a", { href: x.path, target: "_blank", rel: "noopener" }, String(x.port))),
+        h("td", { class: "muted" }, x.source + (x.service ? " " + x.service : "")), h("td", { class: "mono muted" }, x.address))))));
+    }
+    if (compose) {
+      const svcs = compose.services || [];
+      lines.push(h("h2", {}, "Compose services"),
+        svcs.length ? h("table", {}, h("tbody", {}, ...svcs.map(s => h("tr", {}, h("td", {}, s.service),
+          h("td", { class: "muted" }, s.state + (s.health ? " · " + s.health : "")),
+          h("td", { class: "mono muted" }, (s.ports || []).map(x => `${x.host_ip}:${x.published}→${x.target}`).join(", "))))))
+          : h("p", { class: "muted" }, "None running. The workspace's compose.yaml starts on the server (no privileged containers or host mounts)."),
+        h("div", { class: "row" }, act("Compose up", () => api("POST", `/api/workspaces/${id}/compose/up`, {})),
+          svcs.length ? act("Compose down", () => api("POST", `/api/workspaces/${id}/compose/down`)) : null));
+    }
+    runBox.replaceChildren(h("h2", {}, "Runtime and services"), ...lines, runErr);
+  }
+  refreshRuntime();
+  const runTimer = setInterval(() => { if (!busy) refreshRuntime(); }, 10000);
 
   function renderLease(cur) {
     const l = cur.lease;
@@ -234,6 +297,7 @@ async function workspacePage(id) {
   const timer = setInterval(refresh, 4000);
   cleanup = () => {
     clearInterval(timer);
+    clearInterval(runTimer);
     if (onResize) window.removeEventListener("resize", onResize);
     if (ws) ws.close();
     if (term) term.dispose();

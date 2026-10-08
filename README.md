@@ -48,6 +48,18 @@ cd <workspace> && armageddon follow           # keep it current
 armageddon status                             # replica health
 ```
 
+Run the app on the server seat (Node.js and PHP are detected; a Node version the server lacks is downloaded into the workspace):
+
+```sh
+armageddon runtime                            # what was detected: toolchain, package manager, dev command
+armageddon runtime install                    # toolchain + dependencies, as the workspace user
+armageddon runtime start                      # the dev server; prints its authenticated URL
+armageddon compose up                         # the workspace's compose.yaml (Postgres, Redis, …), checked by the helper
+armageddon ports                              # every port the workspace listens on, with its URL
+```
+
+The dev server stops when a laptop takes the workspace (`work local`); `armageddon work remote --restart` brings it back. Compose services keep running. The workspace page in the browser has the same controls.
+
 For TLS, pass `--tls-cert/--tls-key` to `server init`, or put the server behind a reverse proxy that supports WebSockets.
 
 ## Testing
@@ -57,6 +69,7 @@ go test ./...                       # unit tests
 sudo test/e2e/mvp.sh ./armageddon   # MVP acceptance test (root; helper + unprivileged server; uses /srv and github.com)
 sudo test/e2e/ui.sh ./armageddon    # browser test (Playwright + Chromium) against a fresh split server
 sudo test/integration/escape.sh ./armageddon   # privilege-boundary escape matrix (E1–E6)
+sudo test/e2e/runtime.sh ./armageddon          # runtimes, port proxy and Compose (needs network; Docker for Compose)
 ```
 
 The acceptance test runs the north-star scenario on one machine:
@@ -86,6 +99,7 @@ cmd/armageddon/          single binary: server, hooks, agent, CLI
 internal/server/         HTTP API, authority, Git hosting, workspaces, terminal, embedded web UI
 internal/agent/          device pairing, credential helper, replicas (clone/follow/status)
 internal/treesync/       git-shadow checkpoints (capture, thin-pack transport, verified apply)
+internal/runtimes/       runtime providers (Node.js, PHP), run as the workspace user
 internal/store/          SQLite persistence and migrations
 internal/identity/       argon2id passwords, Ed25519 device challenges
 internal/helper/         privileged helper (root): typed socket API, socket and dev clients

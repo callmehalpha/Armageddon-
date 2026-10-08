@@ -52,6 +52,12 @@ const (
 	// entries under the data directory become owned by the server user.
 	// Workspace-owned directories are never entered.
 	OpRepairDataOwnership Op = "RepairDataOwnership"
+	// Docker Compose for a workspace (plan M8.4, see compose.go): the
+	// workspace's Compose file is checked and run under its own project;
+	// Down and Ps act on that project only.
+	OpComposeUp   Op = "ComposeUp"
+	OpComposeDown Op = "ComposeDown"
+	OpComposePs   Op = "ComposePs"
 )
 
 // opSpec describes which request fields an operation takes. Anything else
@@ -61,6 +67,7 @@ type opSpec struct {
 	spawn     bool
 	signal    bool
 	limits    bool
+	compose   bool
 }
 
 var ops = map[Op]opSpec{
@@ -71,6 +78,9 @@ var ops = map[Op]opSpec{
 	OpSignalWorkspace:      {workspace: true, signal: true},
 	OpSetWorkspaceLimits:   {workspace: true, limits: true},
 	OpRepairDataOwnership:  {},
+	OpComposeUp:            {workspace: true, compose: true},
+	OpComposeDown:          {workspace: true},
+	OpComposePs:            {workspace: true},
 }
 
 // Operations returns the complete operation set, sorted.
@@ -121,11 +131,12 @@ var ErrReservedKind = errors.New("process kind reserved for a later phase")
 
 // Request is one helper request.
 type Request struct {
-	Op        Op          `json:"op"`
-	Workspace string      `json:"workspace,omitempty"`
-	Spawn     *SpawnArgs  `json:"spawn,omitempty"`
-	Signal    *SignalArgs `json:"signal,omitempty"`
-	Limits    *Limits     `json:"limits,omitempty"`
+	Op        Op           `json:"op"`
+	Workspace string       `json:"workspace,omitempty"`
+	Spawn     *SpawnArgs   `json:"spawn,omitempty"`
+	Signal    *SignalArgs  `json:"signal,omitempty"`
+	Limits    *Limits      `json:"limits,omitempty"`
+	Compose   *ComposeArgs `json:"compose,omitempty"`
 }
 
 // SpawnArgs are the parameters of SpawnInWorkspace. Stdio (non-PTY kinds)
@@ -165,8 +176,11 @@ type Response struct {
 	Handle string      `json:"handle,omitempty"`
 	Pid    int         `json:"pid,omitempty"`
 	Exit   *ExitStatus `json:"exit,omitempty"`
-	// Warning carries degraded-mode notes (e.g. no cgroup v2).
+	// Warning carries degraded-mode notes (e.g. no cgroup v2) and the
+	// rewrites ComposeUp made (ports bound to 127.0.0.1).
 	Warning string `json:"warning,omitempty"`
+	// Services is ComposePs's answer.
+	Services []ComposeService `json:"services,omitempty"`
 }
 
 // ExitStatus is how a spawned process ended.
@@ -238,7 +252,7 @@ func (r *Request) Validate() error {
 	if spec.workspace && !ValidWorkspaceID(r.Workspace) {
 		return fmt.Errorf("%s: invalid workspace ID", r.Op)
 	}
-	if spec.spawn != (r.Spawn != nil) || spec.signal != (r.Signal != nil) || spec.limits != (r.Limits != nil) {
+	if spec.spawn != (r.Spawn != nil) || spec.signal != (r.Signal != nil) || spec.limits != (r.Limits != nil) || spec.compose != (r.Compose != nil) {
 		return fmt.Errorf("%s: wrong parameter set", r.Op)
 	}
 	if s := r.Spawn; s != nil {
@@ -274,6 +288,11 @@ func (r *Request) Validate() error {
 		}
 		if !allowedSignals[s.Signal] {
 			return fmt.Errorf("signal %d not allowed", s.Signal)
+		}
+	}
+	if c := r.Compose; c != nil {
+		if err := validComposeFile(c.File); err != nil {
+			return err
 		}
 	}
 	if l := r.Limits; l != nil {

@@ -58,6 +58,10 @@ Device:
   armageddon quarantine list|diff ID|apply ID|export ID DIR|drop ID
                                                  changes kept aside instead of being overwritten
   armageddon sync <workspace>                    checkpoint the server seat now
+  armageddon runtime [status|install|start [--port N]|stop|logs [--follow]]
+                                                 the workspace's runtime on the server seat (Node, PHP)
+  armageddon compose up [--file F]|down|ps       the workspace's Docker Compose services, on the server
+  armageddon ports                               ports the workspace listens on, with their authenticated URLs
   armageddon ssh-config [workspace...] [--file F | --print]
                                                  write ~/.ssh/config Host blocks for the SSH endpoint
   armageddon logout                              forget this device's credentials
@@ -250,6 +254,12 @@ func main() {
 			}
 			return nil
 		})
+	case "runtime":
+		err = runtimeCmd(ctx, args)
+	case "compose":
+		err = composeCmd(args)
+	case "ports":
+		err = portsCmd(args)
 	case "doctor":
 		err = doctorCmd(args)
 	case "release":

@@ -43,8 +43,12 @@ type Server struct {
 	keys   *secretbox.Keyring // server data key (§7.5)
 	credMu sync.Mutex         // serialises credential writes with key rotation
 
-	ide  *ideManager // code-server instances (M4.3)
-	sshd *sshServer  // embedded SSH endpoint (M4.4), nil unless enabled
+	ide *ideManager // code-server instances (M4.3)
+
+	procs        *devProcs // runtime install and dev servers (M8.5)
+	composeMu    sync.Mutex
+	composeCache map[string]*composeCacheEntry // ComposePs answers for the port proxy (M8.6)
+	sshd         *sshServer                    // embedded SSH endpoint (M4.4), nil unless enabled
 
 	clock func() int64 // unix ms; tests replace it (lease timers)
 
@@ -101,6 +105,8 @@ func New(cfg *config.Server, opts ...Option) (*Server, error) {
 		return nil, fmt.Errorf("data key: %w", err)
 	}
 	s.ide = newIDEManager(s)
+	s.procs = newDevProcs(s)
+	s.composeCache = map[string]*composeCacheEntry{}
 	return s, nil
 }
 

@@ -148,9 +148,13 @@ func (s *Server) handleAcquire(rw http.ResponseWriter, r *http.Request, w *store
 	}
 	if req.Restart && to == ServerSeat {
 		// Q1: dev processes stopped at handoff are restarted by the user or
-		// by `work remote --restart`. Runtimes arrive with Phase 4, which
-		// acts on this event; until then it is recorded only.
+		// by `work remote --restart` (M8.5).
 		s.event(w.ID, kind, id, "runtime.restart_requested", nil)
+		if names, err := s.procs.restartAfterHandoff(rt, w); err != nil {
+			s.event(w.ID, "server", "", "runtime.restart_failed", map[string]any{"error": err.Error()})
+		} else if len(names) > 0 {
+			s.event(w.ID, "server", "", "runtime.restarted", map[string]any{"processes": names})
+		}
 	}
 	out, err := s.leaseReply(w.ID, dev)
 	if err != nil {

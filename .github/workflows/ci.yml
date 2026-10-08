@@ -165,3 +165,21 @@ jobs:
           sudo install -m 0755 armageddon /usr/local/bin/armageddon
           sudo mkdir -p /srv && sudo chmod 755 /srv
           sudo -E env "PATH=$PATH" test/e2e/ide.sh /usr/local/bin/armageddon "$PWD/fake-code-server"
+
+  e2e-runtime:
+    # Plan M8: Node (a sample Next.js app) and PHP runtimes installed and
+    # started as the workspace user, the authenticated port proxy, and
+    # Docker Compose through the helper (refused files, Postgres and Redis).
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build -o armageddon ./cmd/armageddon
+      - name: runtimes and Docker acceptance test
+        run: |
+          sudo install -m 0755 armageddon /usr/local/bin/armageddon
+          sudo mkdir -p /srv && sudo chmod 755 /srv
+          sudo -E env "PATH=$PATH" test/e2e/runtime.sh /usr/local/bin/armageddon

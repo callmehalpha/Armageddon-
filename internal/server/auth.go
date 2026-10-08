@@ -90,9 +90,10 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 			if err == nil && now < x.ExpiresAt && now-x.LastSeenAt < sessionIdle.Milliseconds() {
 				if u, err := s.store.UserByID(x.UserID); err == nil && !u.Disabled {
 					if r.Method != http.MethodGet && r.Method != http.MethodHead {
-						// code-server cannot send our CSRF header; IDE
-						// requests must come from this origin instead.
-						if isIDEPath(r.URL.Path) {
+						// code-server and proxied apps cannot send our CSRF
+						// header; their requests must come from this origin
+						// instead.
+						if isIDEPath(r.URL.Path) || isPortPath(r.URL.Path) {
 							if !sameOrigin(r) {
 								writeErr(rw, http.StatusForbidden, "cross-origin request refused")
 								return
