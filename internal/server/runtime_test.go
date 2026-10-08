@@ -206,3 +206,12 @@ func TestProcNetTCP(t *testing.T) {
 		t.Fatal("a non-loopback address is reachable")
 	}
 }
+
+func TestReachableIPUnspecified(t *testing.T) {
+	if got := reachableIP(net.IPv4zero); got != "127.0.0.1" {
+		t.Errorf("0.0.0.0 → %q, want 127.0.0.1", got)
+	}
+	if got := reachableIP(net.IPv6unspecified); got != "::1" {
+		t.Errorf(":: → %q, want ::1", got)
+	}
+}

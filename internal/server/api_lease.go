@@ -31,7 +31,7 @@ func actorOf(r *http.Request) (string, string) {
 
 func (s *Server) readyRuntime(rw http.ResponseWriter, w *store.Workspace) *runtime {
 	rt := s.runtimeFor(w.ID)
-	if rt == nil || w.State != StateReady {
+	if rt == nil || !running(w) {
 		writeErr(rw, 503, "workspace not running")
 		return nil
 	}
@@ -278,6 +278,9 @@ func (s *Server) handleCheckpointUpload(rw http.ResponseWriter, r *http.Request,
 		writeErr(rw, 403, "devices only")
 		return
 	}
+	if s.refuseWrites(rw, w) {
+		return
+	}
 	cp, base := r.URL.Query().Get("checkpoint"), r.URL.Query().Get("base")
 	if !isOid(cp) || (base != "" && !isOid(base)) {
 		writeErr(rw, 400, "bad checkpoint or base")
@@ -322,6 +325,9 @@ func (s *Server) handleCommit(rw http.ResponseWriter, r *http.Request, w *store.
 		writeErr(rw, 400, "bad request")
 		return
 	}
+	if s.refuseWrites(rw, w) {
+		return
+	}
 	if req.Kind != "flush" && req.Kind != "manual" {
 		req.Kind = "auto"
 	}
@@ -335,6 +341,8 @@ func (s *Server) handleCommit(rw http.ResponseWriter, r *http.Request, w *store.
 		writeLeaseErr(rw, s, w.ID, dev, &LeaseError{Code: "lease_lost", AttemptedEpoch: req.Epoch, Msg: "this device does not hold the lease at that epoch"})
 	case errors.Is(err, ErrParentMismatch):
 		writeLeaseErr(rw, s, w.ID, dev, &LeaseError{Code: "parent_mismatch", AttemptedEpoch: req.Epoch, Msg: "current is not the checkpoint's parent"})
+	case errors.Is(err, ErrDiskFull):
+		s.refuseWrites(rw, w)
 	case errors.Is(err, ErrHeadMissing):
 		writeLeaseErr(rw, s, w.ID, dev, &LeaseError{Code: "head_missing", AttemptedEpoch: req.Epoch, Msg: "the checkpoint's HEAD commit is not in the repository; push refs first"})
 	case err != nil:

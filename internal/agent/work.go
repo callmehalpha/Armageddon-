@@ -4,7 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
+
+	"github.com/callmehalpha/Armageddon-/internal/treesync/gitshadow"
 )
 
 // agentRunning reports whether an agent (`agent run` or `follow`) holds
@@ -118,8 +121,20 @@ func (c *Client) Status(wsID string, out io.Writer) error {
 			lag = fmt.Sprintf("%d checkpoint(s) behind", cur.Seq-st.AppliedSeq)
 		}
 		fmt.Fprintf(out, "server:      checkpoint #%d (%s)\nlease:       %s\n", cur.Seq, lag, leaseLine(cur.Lease))
+		if sk := c.Skew(); sk >= ClockSkewWarnAt || sk <= -ClockSkewWarnAt {
+			fmt.Fprintf(out, "clock:       WARNING: this machine's clock is %s %s the server's. Sync is unaffected (ordering never uses clocks), but TLS certificate checks and log times are; enable NTP on both machines\n", abs(sk), map[bool]string{true: "ahead of", false: "behind"}[sk > 0])
+		}
 	} else {
 		fmt.Fprintf(out, "server:      unreachable (%v)\n", err)
+	}
+	// Files the size policy left out (F17), as of the newest checkpoint here.
+	newest := st.AppliedOid
+	if len(st.Pending) > 0 {
+		newest = st.Pending[len(st.Pending)-1].Oid
+	}
+	if m, err := sh.ReadMeta(newest); err == nil && m.Excluded != nil && len(m.Excluded.Oversize) > 0 {
+		fmt.Fprintf(out, "not synced:  %d file(s) over the size limit (sync.max_file_size in %s): %s\n",
+			len(m.Excluded.Oversize), gitshadow.PolicyFile, strings.Join(m.Excluded.Oversize, ", "))
 	}
 	if agentRunning(wsID) {
 		state := st.Status
@@ -155,4 +170,11 @@ func (c *Client) Status(wsID string, out io.Writer) error {
 		}
 	}
 	return nil
+}
+
+func abs(d time.Duration) time.Duration {
+	if d < 0 {
+		return -d
+	}
+	return d
 }

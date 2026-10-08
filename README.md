@@ -2,110 +2,159 @@
 
 **Your development environment survives the machine.**
 
-Armageddon is a self-hosted development workspace server. Your code, Git history and *uncommitted* work live on your own server. You work there from a browser, and laptops keep live replicas. If a laptop dies, you lose nothing: open the browser on any machine and continue, or clone the replica again.
-
-> **Status: MVP (v0.1 first slice).** See [`docs/design/`](docs/design/) for the design contract and plan. Everything here runs; the [MVP limits](#mvp-limits) are real.
+Armageddon is a self-hosted workspace server for developers. Your code, your Git history and your *uncommitted* work live on a server you own. You work there from a browser, an IDE or SSH, and your laptops keep live copies. If a laptop is lost, stolen or dies, you lose nothing: open a browser anywhere and carry on.
 
 ![Workspace with browser terminal](docs/screenshots/2-workspace.png)
 
-## How it works
+> **Status: v0.1, feature-complete and hardened (M9).** Everything described here runs and is tested. It has not yet been used day to day by people other than its authors, so expect rough edges. See [limitations](#limitations).
 
-- **The server seat is where you work.** Each workspace has a Git working tree on the server, with a browser terminal. Each workspace runs as its own OS user.
-- **Committed history** moves only through Git. The server hosts the canonical repository over smart HTTP.
-- **Uncommitted work** is captured as **checkpoints** a couple of seconds after it changes. A checkpoint holds every working-tree file (including `.env`, deliberately), the staged index and HEAD. It's stored in a separate internal repository, so your Git history stays clean.
-- **Laptops run follower replicas.** `armageddon clone` gives an exact copy, including uncommitted and staged work. `armageddon follow` keeps it current. Replicas are read-only. If you edit one anyway, your edits are uploaded to the server as a *quarantine* before anything overwrites them; nothing is silently lost.
+## The problem
 
-## Quickstart
+Git protects what you commit. It does not protect what you are working on right now:
+
+- the half-finished feature you have not committed yet;
+- what you staged, your stashes, your local branches;
+- the `.env` files and local setup that make the project actually run.
+
+All of that lives on one laptop. When the laptop dies, it goes with it, and getting a new machine back to "I can work on this project" takes hours. Cloud IDEs solve part of this, but your code then lives on someone else's computer, and you work only in their browser editor.
+
+## The solution
+
+Armageddon keeps a complete, live copy of every project, uncommitted work included, on **your own server**, and treats your laptops as copies of it rather than the other way round.
+
+- **Work on the server.** Each project is a *workspace* with a working tree on your server. Open it from the browser terminal, the browser IDE (VS Code in the browser), or SSH from your own editor. Each workspace runs as its own Linux user, isolated from the others and from the server.
+- **Uncommitted work is saved continuously.** A couple of seconds after any file changes, Armageddon captures a *checkpoint*: every file, the staged changes and the current commit. Checkpoints are kept apart from your Git history, which stays clean.
+- **Laptops keep live replicas.** `armageddon clone` gives you an exact copy, uncommitted work and `.env` included, and keeps it current. Want to work offline or with local tools? `armageddon work local` moves the workspace to your laptop, and `work remote` hands it back.
+- **Nothing is ever overwritten silently.** Exactly one place writes at a time. When changes collide, the losing side is set aside in a *quarantine* for you to review, never dropped.
+- **Every replica is a backup.** If the server itself is lost, a laptop's replica can rebuild the workspace on a new one, history and uncommitted work included.
+- **Run the app too.** Node.js and PHP projects are detected and their dev server runs on the workspace behind an authenticated URL; Docker Compose services (Postgres, Redis…) run alongside.
+
+[How it works](docs/concepts.md) explains workspaces, seats, checkpoints, the lease and quarantine in more depth.
+
+## How to set it up
+
+You need a Linux server (a small VPS is enough: Ubuntu 24.04, Debian 12 or Fedora 40, 1 GB RAM, 10 GB disk) with git 2.39 or newer, and Go 1.26 to build. Laptops can run Linux or macOS.
+
+### 1. Install the server
+
+There is no published release yet, so build from source:
 
 ```sh
-go build -o armageddon ./cmd/armageddon            # Go ≥ 1.24 (the toolchain auto-updates as needed); git ≥ 2.39 on the server
+git clone https://github.com/callmehalpha/Armageddon-.git && cd Armageddon-
+go build -o armageddon ./cmd/armageddon
 sudo install -m 0755 armageddon /usr/local/bin/
 
-# Server: the server runs as the unprivileged `armageddon` user; the helper
-# runs as root and is the only thing that can create workspace users.
+# The server runs as an unprivileged user; a small root helper is the only
+# part allowed to create workspace users.
 sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin armageddon
 sudo install -d -o armageddon -g armageddon -m 0755 /var/lib/armageddon
 sudo -u armageddon armageddon server init --data /var/lib/armageddon \
-     --listen :8080 --public-url http://your-server:8080
-sudo armageddon helper --data /var/lib/armageddon &          # root; socket /run/armageddon/helper.sock
+     --domain dev.example.com --acme-email you@example.com   # automatic HTTPS
+     # or: --ip-only for a self-signed certificate on a bare IP
+sudo armageddon helper --data /var/lib/armageddon &
 sudo -u armageddon armageddon server run --data /var/lib/armageddon
-#   → prints a one-time setup URL: open it to create the first admin.
-# An MVP data directory (written by a root server) is upgraded automatically.
 ```
 
-In the browser:
-1. Create the admin from the setup URL.
-2. Create a workspace, either empty or cloned from a Git URL.
-3. Work in its terminal: edit, `git commit`, `git push origin`.
+The server prints a one-time setup link. Open it to create the first admin.
 
-On a laptop:
+Once releases are published, one command does all of this, including systemd services, and verifies the release signature:
 
 ```sh
-armageddon login http://your-server:8080      # approve the device in the browser
-armageddon workspaces
-armageddon clone <workspace>                  # exact replica, incl. uncommitted work
-cd <workspace> && armageddon follow           # keep it current
-armageddon status                             # replica health
+curl -fsSL https://github.com/callmehalpha/Armageddon-/releases/latest/download/install.sh | sudo sh
 ```
 
-Run the app on the server seat (Node.js and PHP are detected; a Node version the server lacks is downloaded into the workspace):
+[Operating a server](docs/operations.md) covers TLS, updates and rollback, backups, `doctor` and Docker Compose deployment.
+
+### 2. Create a workspace
+
+In the browser, create a workspace, either empty or cloned from a Git URL, and open its terminal. Edit, `git commit` and `git push` as usual.
+
+### 3. Connect a laptop
 
 ```sh
-armageddon runtime                            # what was detected: toolchain, package manager, dev command
-armageddon runtime install                    # toolchain + dependencies, as the workspace user
-armageddon runtime start                      # the dev server; prints its authenticated URL
-armageddon compose up                         # the workspace's compose.yaml (Postgres, Redis, …), checked by the helper
-armageddon ports                              # every port the workspace listens on, with its URL
+armageddon login https://dev.example.com      # approve this device in the browser
+armageddon workspaces                         # what you can access
+armageddon clone my-project                   # exact replica, uncommitted work included
+armageddon agent install                      # keep replicas current from now on
+armageddon status                             # replica health, and who holds the workspace
 ```
 
-The dev server stops when a laptop takes the workspace (`work local`); `armageddon work remote --restart` brings it back. Compose services keep running. The workspace page in the browser has the same controls.
-
-For TLS, pass `--tls-cert/--tls-key` to `server init`, or put the server behind a reverse proxy that supports WebSockets.
-
-## Testing
+To write on the laptop instead of the server:
 
 ```sh
-go test ./...                       # unit tests
-sudo test/e2e/mvp.sh ./armageddon   # MVP acceptance test (root; helper + unprivileged server; uses /srv and github.com)
-sudo test/e2e/ui.sh ./armageddon    # browser test (Playwright + Chromium) against a fresh split server
-sudo test/integration/escape.sh ./armageddon   # privilege-boundary escape matrix (E1–E6)
-sudo test/e2e/runtime.sh ./armageddon          # runtimes, port proxy and Compose (needs network; Docker for Compose)
+armageddon work local      # the laptop becomes the writer; the server follows
+armageddon work remote     # hand it back
 ```
 
-The acceptance test runs the north-star scenario on one machine:
-- a real server with isolated workspace users;
-- edits, staged work and commits on the server seat;
-- a paired "laptop" that clones and follows;
-- the replica deleted and recovered;
-- a quarantined local edit;
-- a server restart;
-- Git access control.
+### 4. Run the app on the server
 
-## MVP limits
+```sh
+armageddon runtime install     # toolchain and dependencies, as the workspace user
+armageddon runtime start       # the dev server; prints its authenticated URL
+armageddon compose up          # the workspace's compose.yaml
+armageddon ports               # every listening port, with its URL
+```
 
-The full list, including what couldn't be verified in the cloud sandbox and how to run everything on your own machine, is in [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md).
+### A note on `.env` files
 
-- **Replicas are read-only.** Local write mode (taking the lease to your laptop) is milestone M7.
-- **Two processes:** `armageddon helper` runs as root and serves only the allowlisted API of contract §2.5; `armageddon server run` runs as the unprivileged `armageddon` user. Without a helper (non-root development) everything runs as the current user, with no isolation.
-- **No installer, automatic TLS (ACME) or self-update yet** (M5).
-- **No SSH endpoint or code-server yet** (M4). The browser terminal is the server seat's UI.
-- **Polling capture:** the server seat is scanned every 2 s. That's fine up to roughly 50k files (see `docs/design/prototypes/P1-capture-perf.md`).
-- **Trash refs** (deleted or force-moved branches) are kept in the workspace repository under `refs/armageddon/trash/`, hidden from clients.
+`.env` files are copied to your server, your replicas and your server backups, on purpose: a workspace you cannot run is not one you can continue elsewhere. They never enter Git history and are never pushed to your Git remote. Keep secrets that must not leave one machine outside the working tree. [More on this](docs/concepts.md#your-env-files-are-copied-to-your-server-and-replicas).
 
-## Layout
+When something goes wrong, see [troubleshooting](docs/troubleshooting.md).
+
+## Limitations
+
+The full list, with workarounds and what is planned, is in [docs/LIMITATIONS.md](docs/LIMITATIONS.md). The ones most likely to matter:
+
+- **One writer at a time.** A workspace is written either on the server or on one laptop, never two at once. Use separate workspaces for separate people working in parallel.
+- **Size.** Comfortable up to about 50,000 tracked files and 5 GB per repository. Files over 50 MiB are not synced unless you raise the limit (`.armageddon/sync.yaml`).
+- **Trusted members only.** The browser IDE and app previews are served from the Armageddon origin, and workspaces share the host network. Share a server only with people you trust (B13, B14, B21).
+- **Not supported:** Windows laptops, Git submodules, Git LFS content (pointers sync, content does not).
+- **Runtimes:** Node.js and PHP only. The dev server does not survive a server restart (Compose services do).
+- **No releases yet.** Build from source until the first signed release is published.
+
+## How to contribute
+
+Contributions are welcome: bug reports, fixes, documentation and tests.
+
+1. **Talk first for big changes.** Open an issue describing the problem before a large pull request. The design contract in [`docs/design/v0.1-architecture.md`](docs/design/v0.1-architecture.md) is the reference for how things must behave; changes to guarantees go there first.
+2. **Set up.** Go 1.26 and git 2.39 or newer. Most of the code builds and unit-tests on Linux and macOS; the end-to-end tests need Linux and root, so use a throwaway VM.
+3. **Before opening a pull request**, run:
+
+   ```sh
+   gofmt -l .                # must print nothing
+   go vet ./...
+   go test ./...
+   ```
+
+   and, on a Linux VM, the end-to-end suite for what you touched:
+
+   ```sh
+   sudo mkdir -p /srv && sudo chmod 755 /srv
+   sudo install -m 0755 armageddon /usr/local/bin/armageddon
+   sudo test/e2e/mvp.sh /usr/local/bin/armageddon        # the core scenario
+   sudo test/e2e/write.sh /usr/local/bin/armageddon      # local write mode
+   sudo test/e2e/disaster.sh /usr/local/bin/armageddon   # failure scenarios F1–F18
+   sudo test/integration/escape.sh /usr/local/bin/armageddon   # privilege boundary
+   ```
+
+   CI runs all of these on every pull request. The [disaster suite](docs/disaster-suite.md) maps each failure scenario to its test.
+4. **Keep the guarantees.** Two rules are never traded away: an acknowledged checkpoint is never lost, and nothing a user wrote is overwritten without being set aside. A change touching capture, apply or the lease needs a test that would catch a violation.
+5. **Security issues:** please report them privately to the maintainer rather than in a public issue. The last review is in [`docs/security-review-v0.1.md`](docs/security-review-v0.1.md).
+
+### Code layout
 
 ```
-cmd/armageddon/          single binary: server, hooks, agent, CLI
-internal/server/         HTTP API, authority, Git hosting, workspaces, terminal, embedded web UI
-internal/agent/          device pairing, credential helper, replicas (clone/follow/status)
-internal/treesync/       git-shadow checkpoints (capture, thin-pack transport, verified apply)
-internal/runtimes/       runtime providers (Node.js, PHP), run as the workspace user
+cmd/armageddon/          the single binary: server, helper, agent and CLI
+internal/server/         HTTP API, lease authority, Git hosting, workspaces, terminal, web UI
+internal/helper/         the root helper: a small, allowlisted API over a Unix socket
+internal/agent/          device pairing, replicas, local write mode, quarantine
+internal/treesync/       checkpoints: capture, transfer and verified apply
+internal/runtimes/       Node.js and PHP runtimes, run as the workspace user
 internal/store/          SQLite persistence and migrations
-internal/identity/       argon2id passwords, Ed25519 device challenges
-internal/helper/         privileged helper (root): typed socket API, socket and dev clients
-internal/sysuser/        compatibility alias for helper.Account (MVP name)
-test/e2e/mvp.sh          acceptance test
-docs/design/             design contract, implementation plan, prototype results
+internal/doctor/         health checks and safe repairs
+internal/lifecycle/      update and rollback
+test/e2e/, test/integration/   end-to-end, disaster and escape tests
+docs/                    concepts, operations, troubleshooting, design and reviews
 ```
 
 ## License

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/callmehalpha/Armageddon-/internal/faults"
 	"github.com/callmehalpha/Armageddon-/internal/treesync/gitshadow"
 )
 
@@ -66,7 +67,7 @@ func (r *replica) captureWriter() {
 	if prev, err := r.sh.StateOf(tail); err == nil && state.Same(prev) {
 		return
 	}
-	ref := fmt.Sprintf("refs/armageddon/pending/%d", time.Now().UnixNano())
+	ref := fmt.Sprintf("refs/armageddon/pending/%d", faults.Now().UnixNano())
 	oid, err := r.sh.CommitState(state, ref, tail, 0)
 	if err != nil {
 		r.say("capture failed: %v", err)

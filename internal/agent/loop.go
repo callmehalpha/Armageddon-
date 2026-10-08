@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/callmehalpha/Armageddon-/internal/faults"
 	"github.com/callmehalpha/Armageddon-/internal/treesync/gitshadow"
 )
 
@@ -504,7 +505,7 @@ func (r *replica) quarantineLocal(reason string) (string, error) {
 			return "", nil
 		}
 	}
-	ref := fmt.Sprintf("refs/armageddon/outbox/%d", time.Now().UnixNano())
+	ref := fmt.Sprintf("refs/armageddon/outbox/%d", faults.Now().UnixNano())
 	oid, err := r.sh.CommitState(state, ref, base, 0)
 	if err != nil {
 		return "", err

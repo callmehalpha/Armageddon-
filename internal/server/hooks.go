@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -47,8 +48,23 @@ func HookMain(name string, args []string) int {
 		if args[0] == "committed" {
 			m := HookMessage{Hook: name}
 			for _, u := range readUpdates() {
-				if tracked(u[2]) {
-					m.Updates = append(m.Updates, u)
+				if !tracked(u[2]) {
+					continue
+				}
+				m.Updates = append(m.Updates, u)
+				// Deletions are trashed once committed, and only if the ref
+				// is really gone: Git also runs this hook for the
+				// packed-refs side of a delete and for `pack-refs` (run by
+				// `git gc`), where a "deleted" loose ref still resolves.
+				if !isZero(u[1]) {
+					continue
+				}
+				if _, err := gitOut("rev-parse", "--verify", "-q", u[2]); err != nil {
+					if old := pendingOld(u[2], u[0]); old != "" {
+						if t := trash(old, u[1], u[2]); t != "" {
+							m.Trash = append(m.Trash, t)
+						}
+					}
 				}
 			}
 			notifyAuthority(m)
@@ -59,6 +75,14 @@ func HookMain(name string, args []string) int {
 		}
 		for _, u := range readUpdates() {
 			if !tracked(u[2]) {
+				continue
+			}
+			if isZero(u[1]) {
+				// Deletions are trashed at "committed" (above); remember the
+				// tip now, while the ref still resolves.
+				if cur, err := gitOut("rev-parse", "--verify", "-q", u[2]); err == nil {
+					rememberOld(u[2], cur)
+				}
 				continue
 			}
 			// The hook's old value can be zero for unconditional updates:
@@ -104,6 +128,53 @@ func seatApplyMain(args []string) int {
 	}
 	return 0
 }
+
+// rememberOld and pendingOld carry a deleted ref's tip from the
+// "prepared" hook run to the "committed" one (separate processes).
+func pendingFile() string {
+	dir, err := gitOut("rev-parse", "--git-common-dir")
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "armageddon-pending-deletes")
+}
+
+func rememberOld(ref, oid string) {
+	if p := pendingFile(); p != "" {
+		if f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
+			fmt.Fprintf(f, "%s %s\n", oid, ref)
+			f.Close()
+		}
+	}
+}
+
+// pendingOld returns the tip remembered for ref (or hookOld when it is
+// set) and forgets it.
+func pendingOld(ref, hookOld string) string {
+	p := pendingFile()
+	b, _ := os.ReadFile(p)
+	old, keep := "", []string{}
+	for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if oid, r, ok := strings.Cut(l, " "); ok && r == ref {
+			old = oid
+		} else if l != "" {
+			keep = append(keep, l)
+		}
+	}
+	if len(b) > 0 {
+		if len(keep) == 0 {
+			os.Remove(p)
+		} else {
+			os.WriteFile(p, []byte(strings.Join(keep, "\n")+"\n"), 0o600)
+		}
+	}
+	if !isZero(hookOld) {
+		return hookOld
+	}
+	return old
+}
+
+func isZero(oid string) bool { return strings.Trim(oid, "0") == "" }
 
 func tracked(ref string) bool {
 	return strings.HasPrefix(ref, "refs/heads/") || strings.HasPrefix(ref, "refs/tags/")

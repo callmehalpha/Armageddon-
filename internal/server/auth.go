@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
+	goruntime "runtime"
 	"strings"
 	"time"
 
@@ -174,7 +175,17 @@ func (s *Server) createUserWithToken(rw http.ResponseWriter, r *http.Request, ki
 		writeErr(rw, 400, "username: 2-32 characters, lowercase letters, digits, - or _, starting with a letter")
 		return
 	}
-	hash, err := identity.HashPassword(req.Password)
+	// Check the link before the expensive hash, so requests without a valid
+	// one cost a database lookup, not 64 MiB of argon2 (security review M9.2).
+	if !s.store.OneTimeTokenValid(ids.Hash(req.Token), kind, store.Now()) {
+		writeErr(rw, 403, "this link is invalid, expired or already used")
+		return
+	}
+	var hash string
+	err := withHashSlot(r.Context(), func() (err error) {
+		hash, err = identity.HashPassword(req.Password)
+		return err
+	})
 	if err != nil {
 		writeErr(rw, 400, err.Error())
 		return
@@ -209,6 +220,21 @@ func (s *Server) createUserWithToken(rw http.ResponseWriter, r *http.Request, ki
 	writeJSON(rw, 200, map[string]any{"user": publicUser(u), "csrf": x.CSRF})
 }
 
+// hashSlots bounds concurrent argon2 work (64 MiB and a core each), so a
+// flood of logins queues instead of exhausting the server's memory.
+var hashSlots = make(chan struct{}, max(2, goruntime.NumCPU()/2))
+
+// withHashSlot runs fn once a slot is free, or fails when ctx ends first.
+func withHashSlot(ctx context.Context, fn func() error) error {
+	select {
+	case hashSlots <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-hashSlots }()
+	return fn()
+}
+
 func publicUser(u *store.User) map[string]string {
 	return map[string]string{"id": u.ID, "username": u.Username, "role": u.Role}
 }
@@ -220,7 +246,14 @@ func (s *Server) handleLogin(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, err := s.store.UserByName(strings.ToLower(strings.TrimSpace(req.Username)))
-	if err != nil || u.Disabled || !identity.VerifyPassword(u.PasswordHash, req.Password) {
+	ok := false
+	if err == nil && !u.Disabled {
+		if withHashSlot(r.Context(), func() error { ok = identity.VerifyPassword(u.PasswordHash, req.Password); return nil }) != nil {
+			writeErr(rw, 503, "too many logins at once; try again")
+			return
+		}
+	}
+	if !ok {
 		time.Sleep(300 * time.Millisecond) // blunt online guessing
 		writeErr(rw, 401, "wrong username or password")
 		return

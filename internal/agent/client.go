@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/callmehalpha/Armageddon-/internal/faults"
 	"github.com/callmehalpha/Armageddon-/internal/identity"
 	"github.com/callmehalpha/Armageddon-/internal/tlsedge"
 )
@@ -103,6 +104,7 @@ type Client struct {
 	mu      sync.Mutex
 	token   string
 	expires time.Time
+	skew    time.Duration // this machine's clock minus the server's (F15), from Date headers
 }
 
 func NewClient() (*Client, error) {
@@ -289,7 +291,35 @@ func (c *Client) Raw(method, path string, body io.Reader) (*http.Response, error
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+tok)
-	return c.http.Do(req)
+	resp, err := c.http.Do(req)
+	if err == nil {
+		c.noteDate(resp)
+	}
+	return resp, err
+}
+
+// noteDate records the clock difference with the server. Ordering never
+// depends on clocks (I6) and tokens use relative lifetimes, so skew is
+// only reported: it breaks TLS certificate validity checks and makes logs
+// hard to correlate (contract §10 F15).
+func (c *Client) noteDate(resp *http.Response) {
+	d, err := http.ParseTime(resp.Header.Get("Date"))
+	if err != nil {
+		return
+	}
+	c.mu.Lock()
+	c.skew = faults.Now().Sub(d).Round(time.Second)
+	c.mu.Unlock()
+}
+
+// ClockSkewWarnAt is the skew from which `armageddon status` warns.
+const ClockSkewWarnAt = 2 * time.Minute
+
+// Skew returns the last measured clock difference with the server.
+func (c *Client) Skew() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.skew
 }
 
 // Login pairs this machine with a server using the device-code flow.

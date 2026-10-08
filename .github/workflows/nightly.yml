@@ -1,0 +1,52 @@
+name: nightly
+# Plan M9: the disaster suite and the performance pass against the P1
+# targets, every night on main. Both also run on demand.
+on:
+  schedule:
+    - cron: "41 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  disaster:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build -o armageddon ./cmd/armageddon
+      - name: disaster suite and write-mode failures (contract §10)
+        run: |
+          sudo install -m 0755 armageddon /usr/local/bin/armageddon
+          sudo mkdir -p /srv && sudo chmod 755 /srv
+          sudo -E env "PATH=$PATH" test/e2e/disaster.sh /usr/local/bin/armageddon
+          sudo -E env "PATH=$PATH" test/e2e/write.sh /usr/local/bin/armageddon
+      - name: upgrade rollback (F16)
+        run: go test ./internal/lifecycle -run 'RollsBack|Rollback' -v
+
+  perf:
+    # 50k tracked files and 100k ignored ones; 50 rounds of 20 changed files.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: performance pass (P1 targets)
+        env:
+          ARMAGEDDON_PERF: "1"
+          ARMAGEDDON_PERF_OUT: ${{ runner.temp }}/perf.json
+        run: go test ./internal/treesync/gitshadow -run TestPerfReference -v -timeout 40m
+      - name: results
+        if: always()
+        run: |
+          [ -f "$RUNNER_TEMP/perf.json" ] && { echo '```json'; cat "$RUNNER_TEMP/perf.json"; echo '```'; } >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf
+          path: ${{ runner.temp }}/perf.json
+          if-no-files-found: ignore

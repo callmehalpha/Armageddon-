@@ -26,11 +26,11 @@ release, and lays out:
 
 **Release verification.** The installer checks every artefact's sha256
 against `manifest.json` and the manifest's minisign signature against the
-public key stamped into the published `install.sh`. With the `minisign`
-tool installed the signature check is independent of the downloaded
-binary; without it, the downloaded binary (whose checksum already matched)
-checks the signature. Unsigned releases are refused unless you pass
-`--allow-unsigned`.
+public key stamped into the published `install.sh`. It uses the `minisign`
+tool if installed, otherwise OpenSSL (1.1.1 or newer, installed from the
+distribution if missing); the downloaded
+binary never verifies itself. With neither tool, and for unsigned
+releases, it refuses unless you pass `--allow-unsigned`.
 
 **Services.** If the release's binary has `armageddon helper` (Phase 2),
 the installer installs `armageddon-helper.service` (root, limited
@@ -129,6 +129,14 @@ It checks free disk, data-directory permissions, helper reachability
 remedy. `--repair` rewrites checkpoint refs from the database and writes
 Git's empty tree object into workspaces created by v0.1.0-mvp, which
 referenced it without storing it.
+
+It also checks the clock (NTP synchronisation, contract §10 F15) and lists
+DEGRADED workspaces. `--repair` returns a workspace degraded by a full disk
+(`disk_full`, F8) to READY once free space is back above the floor
+(`min_free_percent`, default 5), and one degraded by a corrupt repository
+(`repo_corrupt`, F10) once its `git fsck` is clean again. To get missing
+objects back, run `armageddon workspace repair --from-device` on a laptop
+that has a replica. See [troubleshooting](troubleshooting.md).
 
 ## Uninstall
 

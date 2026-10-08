@@ -23,6 +23,7 @@ import (
 
 	"github.com/callmehalpha/Armageddon-/internal/config"
 	"github.com/callmehalpha/Armageddon-/internal/helper"
+	"github.com/callmehalpha/Armageddon-/internal/ids"
 	"github.com/callmehalpha/Armageddon-/internal/wsgit"
 
 	_ "modernc.org/sqlite"
@@ -62,6 +63,9 @@ type Env struct {
 	Statfs func(path string) (free, total uint64, err error)
 	// Openat2 probes openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS) on dir.
 	Openat2 func(dir string) error
+	// ClockSynced reports whether the system clock is NTP-synchronised;
+	// ok=false means it cannot tell.
+	ClockSynced func() (synced, ok bool)
 	// FsckSample is how many workspaces get a `git fsck` (default 3).
 	FsckSample int
 	// Repair fixes what can be fixed safely (checkpoint refs from the DB).
@@ -87,6 +91,9 @@ func (e *Env) defaults() {
 	if e.Openat2 == nil {
 		e.Openat2 = probeOpenat2
 	}
+	if e.ClockSynced == nil {
+		e.ClockSynced = timedatectlSynced
+	}
 	if e.FsckSample == 0 {
 		e.FsckSample = 3
 	}
@@ -98,13 +105,15 @@ func (e *Env) defaults() {
 // Run executes every check in order.
 func Run(e Env) []Result {
 	e.defaults()
+	disk := CheckDisk(&e)
 	out := []Result{
-		CheckDisk(&e),
+		disk,
 		CheckPermissions(&e),
 		CheckHelper(&e),
 		CheckGit(&e),
 		CheckCgroup(&e),
 		CheckOpenat2(&e),
+		CheckClock(&e),
 	}
 	wss, err := workspaces(e.DataDir)
 	if err != nil {
@@ -113,6 +122,7 @@ func Run(e Env) []Result {
 		return out
 	}
 	out = append(out, CheckWorkspaceStates(wss))
+	out = append(out, CheckDegraded(&e, wss, disk.Status != Fail)...)
 	out = append(out, CheckFsck(&e, wss))
 	out = append(out, CheckReconcile(&e, wss)...)
 	return out
@@ -336,11 +346,43 @@ func CheckOpenat2(e *Env) Result {
 	return r
 }
 
+// CheckClock (F15): ordering never depends on clocks (I6), but a wrong
+// server clock breaks ACME and TLS validity, and makes logs and the UI's
+// times misleading.
+func CheckClock(e *Env) Result {
+	r := Result{Check: "clock"}
+	synced, ok := e.ClockSynced()
+	switch {
+	case !ok:
+		r.Status, r.Detail = Skip, "cannot tell whether the clock is synchronised (no timedatectl)"
+	case synced:
+		r.Status, r.Detail = OK, "system clock synchronised (NTP)"
+	default:
+		r.Status, r.Detail = Warn, "the system clock is not synchronised"
+		r.Remedy = "Enable time synchronisation (`timedatectl set-ntp true`, or chrony). Sync ordering is unaffected, but certificates and log times are not."
+	}
+	return r
+}
+
+func timedatectlSynced() (bool, bool) {
+	out, err := exec.Command("timedatectl", "show", "-p", "NTPSynchronized", "--value").Output()
+	if err != nil {
+		return false, false
+	}
+	switch strings.TrimSpace(string(out)) {
+	case "yes":
+		return true, true
+	case "no":
+		return false, true
+	}
+	return false, false
+}
+
 // ---- workspace checks ----
 
 type wsRow struct {
-	ID, Slug, State, OSUser, Current string
-	Seq                              int64
+	ID, Slug, State, Reason, OSUser, Current string
+	Seq                                      int64
 }
 
 func workspaces(dataDir string) ([]wsRow, error) {
@@ -353,7 +395,7 @@ func workspaces(dataDir string) ([]wsRow, error) {
 		return nil, err
 	}
 	defer db.Close()
-	rows, err := db.Query(`SELECT id, slug, state, os_user, COALESCE(current_checkpoint_id, ''), checkpoint_seq FROM workspaces WHERE deleted_at IS NULL ORDER BY created_at`)
+	rows, err := db.Query(`SELECT id, slug, state, COALESCE(state_reason, ''), os_user, COALESCE(current_checkpoint_id, ''), checkpoint_seq FROM workspaces WHERE deleted_at IS NULL ORDER BY created_at`)
 	if err != nil {
 		return nil, fmt.Errorf("reading workspaces: %w", err)
 	}
@@ -361,7 +403,7 @@ func workspaces(dataDir string) ([]wsRow, error) {
 	var out []wsRow
 	for rows.Next() {
 		var w wsRow
-		if err := rows.Scan(&w.ID, &w.Slug, &w.State, &w.OSUser, &w.Current, &w.Seq); err != nil {
+		if err := rows.Scan(&w.ID, &w.Slug, &w.State, &w.Reason, &w.OSUser, &w.Current, &w.Seq); err != nil {
 			return nil, err
 		}
 		out = append(out, w)
@@ -406,6 +448,62 @@ func (e *Env) cpsGit(id string, args ...string) ([]byte, error) {
 	cmd := exec.Command(e.Git, append([]string{"--git-dir=" + dir}, args...)...)
 	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1")
 	return cmd.CombinedOutput()
+}
+
+// CheckDegraded looks at each DEGRADED workspace whose cause doctor can
+// verify: disk_full (F8) is cleared once the disk is above the floor again,
+// repo_corrupt (F10) once both repositories pass fsck. With Repair the
+// workspace returns to READY; the running server picks that up.
+func CheckDegraded(e *Env, wss []wsRow, diskOK bool) []Result {
+	var out []Result
+	for _, w := range wss {
+		if w.State != "degraded" {
+			continue
+		}
+		r := Result{Check: "degraded " + w.Slug, Detail: w.Reason}
+		var fixed bool
+		switch {
+		case strings.HasPrefix(w.Reason, "disk_full"):
+			fixed = diskOK
+			r.Remedy = "Free space on the data directory's filesystem (see the disk check), then run `armageddon doctor --repair`. Writers keep their checkpoints queued meanwhile; nothing is lost."
+		case strings.HasPrefix(w.Reason, "repo_corrupt"):
+			fixed = CheckFsck(&Env{DataDir: e.DataDir, Git: e.Git, FsckSample: 1, WorkspaceGit: e.WorkspaceGit}, []wsRow{w}).Status != Fail
+			r.Remedy = "Bring the missing objects back from a device that has a replica (`armageddon workspace repair --from-device`, run in the replica), or restore from a backup."
+		default:
+			// Not a cause doctor can check: report it, never clear it.
+			r.Status, r.Remedy = Fail, "Check the server log for this workspace; it stays readable and refuses writes until the cause is fixed."
+			out = append(out, r)
+			continue
+		}
+		switch {
+		case !fixed:
+			r.Status = Fail
+		case !e.Repair:
+			r.Status, r.Remedy = Warn, "The cause is gone: run `armageddon doctor --repair` to return the workspace to READY."
+		default:
+			if err := setReady(e.DataDir, w.ID); err != nil {
+				r.Status, r.Remedy = Fail, "could not return it to READY: "+err.Error()
+			} else {
+				r.Status, r.Detail, r.Remedy = Repaired, w.Reason+"; the cause is gone, returned to READY", ""
+			}
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+func setReady(dataDir, id string) error {
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dataDir, "armageddon.db")+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	now := time.Now().UnixMilli()
+	if _, err := db.Exec(`UPDATE workspaces SET state = 'ready', state_reason = '', updated_at = ?, row_version = row_version + 1 WHERE id = ? AND state = 'degraded'`, now, id); err != nil {
+		return err
+	}
+	_, err = db.Exec(`INSERT INTO events (id, ts, workspace_id, actor_kind, actor_id, type, payload) VALUES (?, ?, ?, 'server', '', 'workspace.ready', '{"by":"doctor --repair"}')`, ids.New(), now, id)
+	return err
 }
 
 // CheckFsck runs `git fsck --connectivity-only` on a sample of workspaces:

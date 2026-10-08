@@ -148,7 +148,7 @@ func (s *Server) startWorkspaces(ctx context.Context) error {
 		return err
 	}
 	for _, w := range all {
-		if w.State != StateReady {
+		if !running(w) {
 			continue
 		}
 		rt, err := s.newRuntime(w)
@@ -192,6 +192,12 @@ func slugify(name string) string {
 
 // CreateWorkspace registers a workspace and imports it in the background.
 func (s *Server) CreateWorkspace(owner *store.User, name, sourceURL string) (*store.Workspace, error) {
+	return s.createWorkspace(owner, name, sourceURL, nil)
+}
+
+// createWorkspace is CreateWorkspace, optionally seeded from a device
+// replica (F9 b) instead of empty or cloned.
+func (s *Server) createWorkspace(owner *store.User, name, sourceURL string, seed *seedData) (*store.Workspace, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, errors.New("name is required")
@@ -212,9 +218,13 @@ func (s *Server) CreateWorkspace(owner *store.User, name, sourceURL string) (*st
 		}
 		return nil, err
 	}
-	s.event(id, "user", owner.ID, "workspace.created", map[string]string{"name": name, "source": sourceURL})
+	if seed != nil {
+		s.event(id, "device", seed.device, "workspace.created", map[string]string{"name": name, "source": "replica"})
+	} else {
+		s.event(id, "user", owner.ID, "workspace.created", map[string]string{"name": name, "source": sourceURL})
+	}
 	go func() {
-		if err := s.importWorkspace(w, owner); err != nil {
+		if err := s.importWorkspace(w, owner, seed); err != nil {
 			log.Printf("workspace %s import failed: %v", id, err)
 			s.store.SetWorkspaceState(id, StateImporting, StateFailed, err.Error(), store.Now())
 			s.event(id, "server", "", "workspace.failed", map[string]string{"error": err.Error()})
@@ -233,7 +243,7 @@ func validSourceURL(u string) bool {
 
 // importWorkspace builds the on-disk workspace. Every Git command touching
 // workspace-writable data runs as the workspace user (§2.5).
-func (s *Server) importWorkspace(w *store.Workspace, owner *store.User) error {
+func (s *Server) importWorkspace(w *store.Workspace, owner *store.User, seed *seedData) error {
 	if err := s.store.SetWorkspaceState(w.ID, StateCreating, StateImporting, "", store.Now()); err != nil {
 		return err
 	}
@@ -271,7 +281,11 @@ func (s *Server) importWorkspace(w *store.Workspace, owner *store.User) error {
 		}
 		return nil
 	}
-	if w.SourceKind == "clone" {
+	if seed != nil {
+		if err := s.importSeedRepo(rt, seed, run); err != nil {
+			return err
+		}
+	} else if w.SourceKind == "clone" {
 		if err := run(p.Root, "clone", "--bare", "--quiet", "--", w.SourceURL, p.Repo); err != nil {
 			return err
 		}
@@ -340,6 +354,16 @@ func (s *Server) importWorkspace(w *store.Workspace, owner *store.User) error {
 	// First checkpoint right away, then the loop.
 	if _, err := s.captureOnce(rt); err != nil {
 		log.Printf("workspace %s: first checkpoint: %v", w.ID, err)
+	}
+	if seed != nil {
+		if err := s.applySeedCheckpoint(rt, seed); err != nil {
+			// The history is in; only the uncommitted working state is
+			// missing. The device still has it: nothing is lost.
+			log.Printf("workspace %s: seed: working state not applied: %v", w.ID, err)
+			s.event(w.ID, "server", "", "workspace.seed_partial", map[string]string{"error": err.Error()})
+		} else {
+			s.event(w.ID, "device", seed.device, "workspace.seeded", map[string]any{"refs": len(seed.refs), "checkpoint": seed.checkpoint})
+		}
 	}
 	ctx := s.ctx
 	if ctx == nil {
