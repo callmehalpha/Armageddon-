@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/callmehalpha/Armageddon-/internal/faults"
 	"github.com/callmehalpha/Armageddon-/internal/ids"
 	"github.com/callmehalpha/Armageddon-/internal/store"
 	"github.com/callmehalpha/Armageddon-/internal/treesync/gitshadow"
@@ -132,6 +133,7 @@ func (s *Server) syncSeatLocked(rt *runtime) error {
 	if err != nil {
 		return fmt.Errorf("point HEAD: %w", err)
 	}
+	faults.Point("seat-apply") // F7: committed, server worktree not yet applied
 	// Apply from the quarantined capture, verified, never a blind seed: an
 	// edit made after the quarantine's capture must not be overwritten.
 	err = s.seatApply(rt, from, cur)

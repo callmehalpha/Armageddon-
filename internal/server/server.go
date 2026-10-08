@@ -52,6 +52,8 @@ type Server struct {
 
 	clock func() int64 // unix ms; tests replace it (lease timers)
 
+	fsckRound fsckRound // scheduled fsck (F10)
+
 	ctx context.Context
 }
 
@@ -224,6 +226,8 @@ func (s *Server) janitor(ctx context.Context) {
 		case <-t.C:
 		}
 		s.sweepStale()
+		s.checkDisk()
+		s.scheduledFsck()
 		if i%12 == 0 {
 			s.store.Prune(store.Now())
 		}

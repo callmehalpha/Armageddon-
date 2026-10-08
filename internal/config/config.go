@@ -43,6 +43,14 @@ type Server struct {
 	// the directory of the helper socket (/run/armageddon), or a private
 	// temp directory without a helper.
 	RunDir string `json:"run_dir,omitempty"`
+	// MinFreePct is the free-space floor of the data directory's
+	// filesystem, in percent: below it workspaces go DEGRADED and commits
+	// are refused with disk_full (contract §10 F8; default 5).
+	MinFreePct float64 `json:"min_free_percent,omitempty"`
+	// FsckIntervalS is how often every workspace's repositories get a
+	// `git fsck --connectivity-only`; a failure marks the workspace
+	// DEGRADED (F10). Default one day; negative disables it.
+	FsckIntervalS int `json:"fsck_interval_s,omitempty"`
 
 	CodeServer CodeServer `json:"code_server"`
 	SSH        SSH        `json:"ssh"`
@@ -55,6 +63,25 @@ func (c *Server) TStale() time.Duration {
 		return time.Duration(c.LeaseStaleMS) * time.Millisecond
 	}
 	return 2 * time.Minute
+}
+
+// MinFreePercent returns the F8 free-space floor with its default applied.
+func (c *Server) MinFreePercent() float64 {
+	if c.MinFreePct > 0 {
+		return c.MinFreePct
+	}
+	return 5
+}
+
+// FsckInterval returns the F10 fsck period (0: disabled).
+func (c *Server) FsckInterval() time.Duration {
+	switch {
+	case c.FsckIntervalS < 0:
+		return 0
+	case c.FsckIntervalS == 0:
+		return 24 * time.Hour
+	}
+	return time.Duration(c.FsckIntervalS) * time.Second
 }
 
 func (c *Server) THandoff() time.Duration {

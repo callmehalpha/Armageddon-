@@ -45,6 +45,14 @@ type Shadow struct {
 	IndexFile string   // persistent capture index (stat cache)
 	Preserve  []string // filepath.Match patterns on the basename, e.g. ".env*"
 
+	// MaxFileSize overrides the size policy (§6.6 class X): files larger
+	// than this are not captured. 0 means the project's
+	// .armageddon/sync.yaml max_file_size, else DefaultMaxFileSize;
+	// negative means no limit.
+	MaxFileSize int64
+	sizeExempt  map[string]bool // paths the size policy skips (post-apply verify)
+	lastTree    string          // tree of the previous CaptureTree, to undo a late oversize add
+
 	// Prepare, when set, configures every git process (OS user, base
 	// environment). The server uses it to run as the workspace user (§2.5).
 	Prepare func(*exec.Cmd)
@@ -210,14 +218,51 @@ func IndexLocked(gitDir string) bool {
 type CaptureStats struct {
 	PreservedAdded int
 	EmptyDirs      []string
+	Oversize       []string // not captured: larger than the size policy (F17)
 }
 
 // CaptureTree captures the working tree into the shadow and returns the tree
 // oid for /worktree plus the list of non-ignored empty directories.
 func (s *Shadow) CaptureTree() (string, CaptureStats, error) {
 	var st CaptureStats
-	if _, err := s.Git(nil, "add", "-A", "--", "."); err != nil {
+	pol, err := s.sizeScan()
+	if err != nil {
 		return "", st, err
+	}
+	base := s.lastTree
+	if pol.active && base == "" {
+		b, err := s.Git(nil, "write-tree")
+		if err != nil {
+			return "", st, err
+		}
+		base = strings.TrimSpace(string(b))
+	}
+	var added []byte
+	if len(pol.big) == 0 {
+		if added, err = s.Git(nil, "add", "-A", "-v", "--", "."); err != nil {
+			return "", st, err
+		}
+	} else {
+		// Excluded by pathspec, so Git never reads them: a tracked file
+		// that grew past the limit keeps its last captured version.
+		specs := []string{"."}
+		for _, p := range pol.big {
+			specs = append(specs, ":(exclude,literal)"+p)
+		}
+		if added, err = s.Git([]byte(strings.Join(specs, "\x00")), "add", "-A", "-v", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
+			return "", st, err
+		}
+	}
+	st.Oversize = pol.big
+	if pol.active {
+		late, err := s.dropLateOversize(added, pol, base)
+		if err != nil {
+			return "", st, err
+		}
+		if len(late) > 0 {
+			st.Oversize = append(append([]string{}, st.Oversize...), late...)
+			sort.Strings(st.Oversize)
+		}
 	}
 	if err := s.dropFoldedStale(); err != nil {
 		return "", st, err
@@ -268,6 +313,7 @@ func (s *Shadow) CaptureTree() (string, CaptureStats, error) {
 	if err != nil {
 		return "", st, err
 	}
+	s.lastTree = strings.TrimSpace(string(tree))
 	return strings.TrimSpace(string(tree)), st, nil
 }
 
@@ -428,6 +474,12 @@ type Meta struct {
 	EmptyDirs []string      `json:"empty_dirs"`
 	Staged    []StagedEntry `json:"staged"`
 	Seq       int           `json:"seq"`
+	Excluded  *Excluded     `json:"excluded,omitempty"`
+}
+
+// Excluded lists what the capture policy left out (§6.2, F17).
+type Excluded struct {
+	Oversize []string `json:"oversize,omitempty"`
 }
 
 // Checkpoint captures tree + index and writes a checkpoint commit under ref.
@@ -449,14 +501,20 @@ type State struct {
 	Staged    []StagedEntry
 	HeadRef   string
 	HeadOid   string
+	Oversize  []string // files left out by the size policy (F17)
 }
 
 // Same reports whether two states describe the same working state, so the
 // caller can skip creating a checkpoint (§6.3: no-op captures create none).
 func (a State) Same(b State) bool {
 	if a.Tree != b.Tree || a.HeadRef != b.HeadRef || a.HeadOid != b.HeadOid ||
-		len(a.EmptyDirs) != len(b.EmptyDirs) || len(a.Staged) != len(b.Staged) {
+		len(a.EmptyDirs) != len(b.EmptyDirs) || len(a.Staged) != len(b.Staged) || len(a.Oversize) != len(b.Oversize) {
 		return false
+	}
+	for i := range a.Oversize {
+		if a.Oversize[i] != b.Oversize[i] {
+			return false
+		}
 	}
 	for i := range a.EmptyDirs {
 		if a.EmptyDirs[i] != b.EmptyDirs[i] {
@@ -484,7 +542,11 @@ func (s *Shadow) StateOf(cp string) (State, error) {
 	if err != nil {
 		return State{}, err
 	}
-	return State{Tree: tree, EmptyDirs: m.EmptyDirs, Staged: m.Staged, HeadRef: m.HeadRef, HeadOid: m.HeadOid}, nil
+	st := State{Tree: tree, EmptyDirs: m.EmptyDirs, Staged: m.Staged, HeadRef: m.HeadRef, HeadOid: m.HeadOid}
+	if m.Excluded != nil {
+		st.Oversize = m.Excluded.Oversize
+	}
+	return st, nil
 }
 
 // CaptureState captures the working tree, the index delta and HEAD.
@@ -499,7 +561,7 @@ func (s *Shadow) CaptureState() (State, error) {
 	}
 	headOid, _ := s.UserGit(nil, "rev-parse", "-q", "--verify", "HEAD")
 	headRef, _ := s.UserGit(nil, "symbolic-ref", "-q", "HEAD")
-	out := State{Tree: wt, EmptyDirs: st.EmptyDirs, Staged: staged,
+	out := State{Tree: wt, EmptyDirs: st.EmptyDirs, Staged: staged, Oversize: st.Oversize,
 		HeadRef: strings.TrimSpace(string(headRef)), HeadOid: strings.TrimSpace(string(headOid))}
 	if out.EmptyDirs == nil {
 		out.EmptyDirs = []string{}
@@ -515,6 +577,9 @@ func (s *Shadow) CommitState(state State, ref, parent string, seq int) (string, 
 	wt, staged := state.Tree, state.Staged
 	meta := Meta{Format: 1, Parent: parent, HeadRef: state.HeadRef, HeadOid: state.HeadOid,
 		EmptyDirs: state.EmptyDirs, Staged: staged, Seq: seq}
+	if len(state.Oversize) > 0 {
+		meta.Excluded = &Excluded{Oversize: state.Oversize}
+	}
 	if meta.EmptyDirs == nil {
 		meta.EmptyDirs = []string{}
 	}
@@ -715,6 +780,16 @@ func (s *Shadow) applyTrees(fromWT string, fromMeta Meta, toWT string, toMeta Me
 			puts = append(puts, c)
 		}
 	}
+	for _, c := range changes {
+		if err := CheckPath(s.WorkTree, c.path); err != nil {
+			return err
+		}
+	}
+	for _, d := range toMeta.EmptyDirs {
+		if err := CheckPath(s.WorkTree, d); err != nil {
+			return err
+		}
+	}
 	sort.Slice(dels, func(i, j int) bool {
 		return depth(dels[i].path) > depth(dels[j].path) || (depth(dels[i].path) == depth(dels[j].path) && dels[i].path > dels[j].path)
 	})
@@ -824,6 +899,11 @@ func (s *Shadow) applyTrees(fromWT string, fromMeta Meta, toWT string, toMeta Me
 		if c.oldMode == c.newMode && c.oldOid == c.newOid {
 			continue
 		}
+		// Again just before the write: an earlier put may have replaced a
+		// directory on the way.
+		if err := CheckPath(root, c.path); err != nil {
+			return err
+		}
 		content, err := cat.Blob(c.newOid)
 		if err != nil {
 			return err
@@ -844,8 +924,15 @@ func (s *Shadow) applyTrees(fromWT string, fromMeta Meta, toWT string, toMeta Me
 			return err
 		}
 	}
-	// Post-verify.
+	// Post-verify. The size policy must not hide a file this apply just
+	// wrote (a peer's limit may be higher than ours); local oversize files
+	// stay out, as in any capture.
+	s.sizeExempt = map[string]bool{}
+	for _, c := range puts {
+		s.sizeExempt[c.path] = true
+	}
 	cur, _, err := s.CaptureTree()
+	s.sizeExempt = nil
 	if err != nil {
 		return err
 	}
@@ -1089,7 +1176,7 @@ func (s *Shadow) PackSince(cp, base string) ([]byte, error) {
 // cp is not fully present afterwards.
 func (s *Shadow) ReceivePack(pack []byte, ref, cp string) error {
 	if len(pack) > 0 {
-		if _, err := s.Git(pack, "index-pack", "--stdin", "--fix-thin"); err != nil {
+		if _, err := s.Git(pack, "index-pack", "--stdin", "--fix-thin", "--strict"); err != nil {
 			return err
 		}
 	}

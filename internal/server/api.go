@@ -34,6 +34,7 @@ func (s *Server) routes() http.Handler {
 	// Workspaces
 	mux.HandleFunc("GET /api/workspaces", s.requireUser(s.handleListWorkspaces))
 	mux.HandleFunc("POST /api/workspaces", s.requireUser(s.handleCreateWorkspace))
+	mux.HandleFunc("POST /api/workspaces/seed", s.requireUser(s.handleSeed))
 	mux.HandleFunc("GET /api/workspaces/{id}", s.requireUser(s.member(s.handleGetWorkspace)))
 	mux.HandleFunc("GET /api/workspaces/{id}/checkpoints", s.requireUser(s.member(s.handleCheckpoints)))
 	mux.HandleFunc("GET /api/workspaces/{id}/events", s.requireUser(s.member(s.handleEvents)))
@@ -44,6 +45,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/workspaces/{id}/quarantines", s.requireUser(s.member(s.handleQuarantineUpload)))
 	mux.HandleFunc("GET /api/workspaces/{id}/quarantines", s.requireUser(s.member(s.handleQuarantines)))
 	mux.HandleFunc("POST /api/workspaces/{id}/sync", s.requireUser(s.member(s.handleSyncNow)))
+	mux.HandleFunc("POST /api/workspaces/{id}/repair", s.requireUser(s.member(s.handleRepair)))
 	// Local write mode (M7): lease, device checkpoint upload/commit, quarantines, replicas
 	mux.HandleFunc("POST /api/workspaces/{id}/lease/acquire", s.requireUser(s.member(s.handleAcquire)))
 	mux.HandleFunc("POST /api/workspaces/{id}/lease/release", s.requireUser(s.member(s.handleRelease)))
@@ -274,6 +276,9 @@ func (s *Server) handleQuarantineUpload(rw http.ResponseWriter, r *http.Request,
 	if q, err := s.store.QuarantineByCheckpoint(w.ID, dev.ID, cp); err == nil {
 		writeJSON(rw, 200, map[string]string{"id": q.ID}) // retry of an upload that landed
 		return
+	}
+	if s.refuseWrites(rw, w) {
+		return // the device keeps the quarantine and retries (F8)
 	}
 	// Per-device quota (§6.7): refused, never evicted (Q6).
 	if n, err := s.store.OpenQuarantinesOfDevice(w.ID, dev.ID); err != nil || n >= s.quarantineQuota() {

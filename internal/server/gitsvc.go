@@ -34,7 +34,7 @@ func (s *Server) serveGit(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w, _, err := s.store.WorkspaceForMember(wsID, dev.UserID)
-	if err != nil || w.State != StateReady {
+	if err != nil || !running(w) {
 		http.NotFound(rw, r)
 		return
 	}
@@ -52,6 +52,15 @@ func (s *Server) serveGit(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if service == "git-receive-pack" {
+		switch reason := s.writesRefused(w); reason {
+		case "":
+		case ReasonDiskFull:
+			http.Error(rw, "disk_full: the server's disk is almost full; pushes are refused until its administrator frees space and runs `armageddon doctor --repair` (F8). Your commits stay on this machine.", http.StatusInsufficientStorage)
+			return
+		default:
+			http.Error(rw, reason+": the workspace is DEGRADED and refuses pushes until it is repaired. Your commits stay on this machine.", http.StatusServiceUnavailable)
+			return
+		}
 		epoch, _ := strconv.ParseInt(r.Header.Get("X-Armageddon-Epoch"), 10, 64)
 		if r.Method == http.MethodPost {
 			// Fencing (§4.2): hold the fence for the whole receive-pack, and

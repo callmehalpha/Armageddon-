@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/callmehalpha/Armageddon-/internal/faults"
 	"github.com/callmehalpha/Armageddon-/internal/wslock"
 	"log"
 	"strings"
@@ -56,7 +57,7 @@ func (s *Server) captureOnce(rt *runtime) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if w.State != StateReady {
+	if !running(w) {
 		return 0, nil
 	}
 	lease, err := s.store.LeaseOf(nil, rt.id)
@@ -66,6 +67,11 @@ func (s *Server) captureOnce(rt *runtime) (int64, error) {
 	if lease.HolderKind != "server" {
 		// A device writes: the server worktree is a follower (§4.3).
 		return 0, s.syncSeatLocked(rt)
+	}
+	if w.State != StateReady {
+		// DEGRADED (F8, F10): the server seat's edits stay in tree/ and are
+		// captured once the workspace is READY again.
+		return 0, nil
 	}
 	base := s.seatBase(rt)
 	if base == "" && w.CurrentCheckpoint != "" {
@@ -132,6 +138,9 @@ func (s *Server) commitCheckpoint(rt *runtime, epoch int64, authorKind, authorDe
 	if existing, err := s.store.CheckpointByID(rt.id, cp); err == nil {
 		return existing.Seq, nil // idempotent retry (F5)
 	}
+	if s.checkDisk() {
+		return 0, ErrDiskFull // F8: the writer keeps it queued and retries
+	}
 	meta, err := rt.cps.ReadMeta(cp)
 	if err != nil {
 		return 0, fmt.Errorf("checkpoint %s unreadable: %w", cp, err)
@@ -147,6 +156,7 @@ func (s *Server) commitCheckpoint(rt *runtime, epoch int64, authorKind, authorDe
 			return 0, ErrHeadMissing
 		}
 	}
+	faults.Point("commit-before-db") // F6: staged, not acknowledged
 	var seq int64
 	err = s.store.Tx(context.Background(), func(tx *sql.Tx) error {
 		if existing, err := s.store.CheckpointByIDTx(tx, rt.id, cp); err == nil {
@@ -189,6 +199,7 @@ func (s *Server) commitCheckpoint(rt *runtime, epoch int64, authorKind, authorDe
 	if err != nil {
 		return 0, err
 	}
+	faults.Point("commit-after-db") // F6: in the database, refs not updated, no reply sent
 	rt.cps.Git(nil, "update-ref", fmt.Sprintf("refs/checkpoints/%d", seq), cp)
 	rt.cps.Git(nil, "update-ref", "refs/checkpoints/current", cp)
 	if authorKind == "device" {

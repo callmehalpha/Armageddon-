@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -64,7 +65,15 @@ Device:
   armageddon ports                               ports the workspace listens on, with their authenticated URLs
   armageddon ssh-config [workspace...] [--file F | --print]
                                                  write ~/.ssh/config Host blocks for the SSH endpoint
+  armageddon workspace seed --from-replica [dir] [--name NAME]
+                                                 rebuild a lost workspace on this (new) server from a replica (F9)
+  armageddon workspace repair --from-device [dir]
+                                                 send a replica's history to restore objects the server lost (F10)
   armageddon logout                              forget this device's credentials
+
+In the workspace on the server (terminal, IDE, SSH):
+  armageddon git trash [list | restore <n> [--as NAME]]
+                                                 deleted and force-moved branches and tags, kept by the server
 
 Other:
   armageddon version
@@ -254,6 +263,10 @@ func main() {
 			}
 			return nil
 		})
+	case "git":
+		err = gitTrashCmd(args, os.Stdout)
+	case "workspace":
+		err = workspaceCmd(args)
 	case "runtime":
 		err = runtimeCmd(ctx, args)
 	case "compose":
@@ -426,4 +439,28 @@ func helperCmd(ctx context.Context, args []string) error {
 		return err
 	}
 	return d.Serve(ctx)
+}
+
+// workspaceCmd: recovery from a replica (contract §10 F9 b, F10).
+func workspaceCmd(args []string) error {
+	usage := errors.New("usage: armageddon workspace seed --from-replica [dir] [--name NAME] | repair --from-device [dir]")
+	if len(args) == 0 {
+		return usage
+	}
+	fs := flag.NewFlagSet("workspace "+args[0], flag.ExitOnError)
+	fromReplica := fs.Bool("from-replica", false, "seed from the replica in dir (default: the current directory)")
+	fromDevice := fs.Bool("from-device", false, "repair from the replica in dir (default: the current directory)")
+	name := fs.String("name", "", "name of the new workspace (default: the replica directory's name)")
+	fs.Parse(reorder(args[1:]))
+	dir := "."
+	if fs.NArg() > 0 {
+		dir = fs.Arg(0)
+	}
+	switch {
+	case args[0] == "seed" && *fromReplica:
+		return withClient(func(c *agent.Client) error { return c.SeedFromReplica(dir, *name, os.Stdout) })
+	case args[0] == "repair" && *fromDevice:
+		return withClient(func(c *agent.Client) error { return c.RepairFromDevice(dir, os.Stdout) })
+	}
+	return usage
 }
