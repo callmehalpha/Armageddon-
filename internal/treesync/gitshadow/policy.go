@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -232,15 +233,21 @@ func (s *Shadow) regularSizes(paths []string, fn func(string, int64)) error {
 		n := min(len(paths), 1000)
 		chunk := paths[:n]
 		paths = paths[n:]
-		cmd := exec.Command("stat", append([]string{"--printf=%s\t%F\t%n\\0", "--"}, chunk...)...)
+		cmd := exec.Command("stat", append(statArgs(), chunk...)...)
 		cmd.Dir = s.WorkTree
 		s.Prepare(cmd)
 		cmd.Env = append(cmd.Env, "LC_ALL=C") // %F unlocalised
 		// A file removed meanwhile makes stat fail; the others still print.
 		out, _ := cmd.Output()
-		for _, rec := range splitZ(out) {
+		recs := splitZ(out)
+		if goruntime.GOOS != "linux" {
+			// BSD stat cannot print NUL: a name with a newline in it is
+			// misread and simply not size-checked.
+			recs = strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+		}
+		for _, rec := range recs {
 			f := strings.SplitN(rec, "\t", 3)
-			if len(f) != 3 || f[1] != "regular file" && f[1] != "regular empty file" {
+			if len(f) != 3 || f[1] != "regular file" && f[1] != "regular empty file" && f[1] != "Regular File" {
 				continue
 			}
 			if size, err := strconv.ParseInt(f[0], 10, 64); err == nil {
@@ -249,6 +256,15 @@ func (s *Shadow) regularSizes(paths []string, fn func(string, int64)) error {
 		}
 	}
 	return nil
+}
+
+// statArgs prints "size TAB type TAB name" per file: GNU stat on Linux
+// (where the server seat runs), BSD stat elsewhere.
+func statArgs() []string {
+	if goruntime.GOOS == "linux" {
+		return []string{"--printf=%s\t%F\t%n\\0", "--"}
+	}
+	return []string{"-f", "%z%t%HT%t%N", "--"}
 }
 
 // HumanSize renders a byte count the way the policy file writes it.
