@@ -127,6 +127,20 @@ ensure_git() {
   say "git $(git_version) installed"
 }
 
+# ensure_openssl installs OpenSSL to check the release signature with,
+# when neither minisign nor a capable openssl is present (minimal images).
+ensure_openssl() {
+  [ -z "$PREFIX" ] || return 0
+  say "installing openssl to verify the release signature"
+  case $PKG in
+    apt)
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get install -y -qq openssl >/dev/null 2>&1 ||
+        { apt-get update -qq && apt-get install -y -qq openssl >/dev/null; } || true ;;
+    dnf) dnf install -y -q openssl >/dev/null || true ;;
+  esac
+}
+
 # ---- 3. Release: download or bundle, then verify -----------------------------
 fetch() { # fetch URL FILE
   if command -v curl >/dev/null 2>&1; then curl -fsSL --retry 3 -o "$2" "$1"
@@ -223,6 +237,7 @@ verify_release() {
     warn "signature NOT checked: no public key (--allow-unsigned)"
     return
   fi
+  command -v minisign >/dev/null 2>&1 || openssl_ed25519 || ensure_openssl
   if command -v minisign >/dev/null 2>&1; then
     minisign -Vq -P "$ARMAGEDDON_PUBKEY" -m "$STAGE/manifest.json" -x "$STAGE/manifest.json.minisig" ||
       die "manifest signature is INVALID: refusing to install"

@@ -27,7 +27,8 @@ release, and lays out:
 **Release verification.** The installer checks every artefact's sha256
 against `manifest.json` and the manifest's minisign signature against the
 public key stamped into the published `install.sh`. It uses the `minisign`
-tool if installed, otherwise OpenSSL (1.1.1 or newer); the downloaded
+tool if installed, otherwise OpenSSL (1.1.1 or newer, installed from the
+distribution if missing); the downloaded
 binary never verifies itself. With neither tool, and for unsigned
 releases, it refuses unless you pass `--allow-unsigned`.
 
