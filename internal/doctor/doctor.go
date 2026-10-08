@@ -470,6 +470,9 @@ func CheckDegraded(e *Env, wss []wsRow, diskOK bool) []Result {
 			fixed = CheckFsck(&Env{DataDir: e.DataDir, Git: e.Git, FsckSample: 1, WorkspaceGit: e.WorkspaceGit}, []wsRow{w}).Status != Fail
 			r.Remedy = "Bring the missing objects back from a device that has a replica (`armageddon workspace repair --from-device`, run in the replica), or restore from a backup."
 		default:
+			// Not a cause doctor can check: report it, never clear it.
+			r.Status, r.Remedy = Fail, "Check the server log for this workspace; it stays readable and refuses writes until the cause is fixed."
+			out = append(out, r)
 			continue
 		}
 		switch {

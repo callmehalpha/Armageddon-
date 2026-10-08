@@ -1,6 +1,6 @@
 # Known limitations, and how to resolve them
 
-Status: **2026-10-07, living document.** It now includes the findings of all five post-MVP phases (PRs #7, #9, #10, #11 and #8) and of M8, runtimes and Docker.
+Status: **2026-10-08, living document.** It now includes the findings of all five post-MVP phases (PRs #7, #9, #10, #11 and #8), of M8 (runtimes and Docker) and of M9 (hardening).
 
 There are three kinds of limitation, and they need different responses:
 
@@ -147,7 +147,7 @@ These live on the phase branches until they merge. Run each as root on a VM:
 | B16 | **SSH membership is checked at connect time,** so removing a member doesn't drop live sessions (revoking a device does). Logging out doesn't close open IDE WebSockets | Revoke the device | Session invalidation on membership change |
 | B17 | **The helper adds about 3.5 ms per spawned process** (P6), and each workspace command costs one extra shim process (Phase 2) | None needed for interactive use | ⟨P-16⟩: a minimal non-Go trampoline (about 2.3 ms) |
 | B18 | **The encryption scheme for stored Git credentials differs:** AES-256-GCM in the code, XChaCha20-Poly1305 in contract §7.5 | None needed; both are sound | Align the contract or the code |
-| B19 | **Releases are unsigned** until a signing key is configured (C2) | `install.sh` and `server update` refuse them unless given `--allow-unsigned` | Run `armageddon release keygen` and set the `MINISIGN_SECRET_KEY` and `MINISIGN_PASSWORD` secrets |
+| B19 | **Releases are unsigned** until a signing key is configured (C2), and none is published yet | Build from source. `install.sh` and `server update` refuse unsigned releases unless given `--allow-unsigned`; `install.sh` checks signatures with `minisign` or OpenSSL, never with the downloaded binary (M9.2) | Run `armageddon release keygen` and set the `MINISIGN_SECRET_KEY` and `MINISIGN_PASSWORD` secrets |
 | B20 | **Docker Compose:** workspace users are recreated in creation order on each container start, so their IDs only match the volume while that order is stable | Don't delete workspace users by hand inside the container | Persist the uid map on the volume |
 | B21 | **Workspace ports are served on the Armageddon origin** (M8.6), like the IDE (B13): JavaScript of an app in the workspace runs with the viewer's Armageddon session. Apps also see a path prefix (`/api/workspaces/<id>/ports/<port>/`), so absolute asset URLs such as Next.js's `/_next/…` don't load through the proxy | Trusted members only. For full apps, forward the port over SSH (`ssh -L 3000:localhost:3000 ws-<slug>@server`) or set the framework's base path | A separate origin per port (wildcard subdomain plus a one-time ticket), with B13 |
 | B22 | **Dev servers that listen on all interfaces** (Next.js does by default) are reachable from the network directly, without Armageddon's authentication, if the host firewall lets the port through. Compose ports are always bound to 127.0.0.1 | Open only 80/443 and SSH in the host firewall | A per-workspace network namespace (with B14) |
@@ -155,6 +155,9 @@ These live on the phase branches until they merge. Run each as root on a VM:
 | B24 | **Runtime process state lives in the server's memory:** a server restart ends the install and the dev server (they are helper children) and forgets their output. Compose services keep running | `armageddon runtime start` again after a restart | Persist the desired state (`runtime_instances`) and restart on boot |
 | B25 | **PHP comes from the server:** a version the server lacks is reported, not installed. Bun is not supported (npm is used instead). A Laravel app's asset build (`npm run dev`) is not started | Install the PHP version on the server; run `npm run dev` in the terminal | Per-workspace PHP (static builds) if there is demand |
 | B26 | **`work remote --restart` restarts only the dev server** that the handoff stopped, during this server process's lifetime; an interrupted install is not repeated | `armageddon runtime install` again | With B24 |
+| B27 | **Files over `sync.max_file_size` (50 MiB by default) are not synced** (F17). A file that grows past the limit while it is being captured is caught on the same capture and keeps its previous version | `status` lists them; raise the limit in `.armageddon/sync.yaml` | Git LFS integration after v0.1 |
+| B28 | **`workspace seed --from-replica` rebuilds one workspace;** users, members and other workspaces come only from a backup (F9) | Keep server backups (`server backup`) as well as replicas | — |
+| B29 | **Accepted low findings of the security review** (findings 7, 8, 10 and 12): packs are buffered in memory, `server update` relies on the signature rather than a downgrade check, revoking a device needs no password re-entry, Compose uses root's Docker config | See `docs/security-review-v0.1.md` | Post-v0.1 |
 
 ---
 
@@ -171,6 +174,13 @@ These live on the phase branches until they merge. Run each as root on a VM:
 ---
 
 ## 5. Per-phase findings
+
+- **M9 (hardening):**
+  - Disaster suite: `test/e2e/disaster.sh` covers F1, F5–F10, F12–F15 and F17 (67 checks, nothing skipped); `write.sh` covers F2–F4, F11 and F18; the lifecycle tests cover F16. See `docs/disaster-suite.md`.
+  - New commands: `workspace seed --from-replica` (F9 b), `workspace repair --from-device` (F10), `git trash` (F13). New server settings: `min_free_percent` (F8, default 5) and `fsck_interval_s` (F10, default daily).
+  - Security review: `docs/security-review-v0.1.md`. No open high or critical findings.
+  - Performance at 50k files: capture p95 273 ms, cold capture 11.1 s, both within P1 (`docs/performance.md`).
+  - Not done here: M9.5 (a week of dogfooding) is for the owner, as are C1–C5.
 
 - **Phase 1 (validate, #7):**
   - **P2 on macOS:** found a real capture bug (B12), fixed in the prototype. Afterwards: macOS fuzzing 30/30, focus cases 7/7 in both directions, genuine collisions refused. The full 10,000-sequence run on macOS has not been done yet (start it with `workflow_dispatch`).
