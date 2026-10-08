@@ -308,21 +308,19 @@ settle
 check "and writes again" grep -q after-repair "$R/f10b.txt"
 
 step "F15. clock skew between machines"
-if command -v faketime >/dev/null 2>&1; then
-  agent_kill
-  AGENT_ENV="faketime -f +3h" agent_up
-  laptop work local >/dev/null 2>&1 || fail "work local with a skewed clock"
-  echo "written 3 hours in the future" > "$R/f15.txt"
-  eventually "a laptop 3 hours ahead still writes (ordering never uses clocks)" grep -q "3 hours in the future" "$TREE/f15.txt"
-  (cd "$R" && faketime -f +3h "$BIN" status) >"$ROOT/skew.out" 2>&1 || true
-  check "status warns about the skew" grep -q "clock:.*WARNING.*ahead of" "$ROOT/skew.out"
-  laptop work remote >/dev/null 2>&1 || fail "work remote"
-  agent_kill
-  AGENT_ENV='' agent_up
-  check "acknowledged checkpoints intact" acked_invariant
-else
-  skip "faketime is not installed; the skewed-laptop check runs in CI (apt-get install faketime)"
-fi
+# The laptop's clock runs 3 hours ahead (an injected offset: faketime
+# cannot shift a Go binary's clock).
+agent_kill
+AGENT_ENV="env ARMAGEDDON_FAULTS=clock=+3h" agent_up
+laptop work local >/dev/null 2>&1 || fail "work local with a skewed clock"
+echo "written 3 hours in the future" > "$R/f15.txt"
+eventually "a laptop 3 hours ahead still writes (ordering never uses clocks)" grep -q "3 hours in the future" "$TREE/f15.txt"
+(cd "$R" && ARMAGEDDON_FAULTS=clock=+3h "$BIN" status) >"$ROOT/skew.out" 2>&1 || true
+check "status warns about the skew" grep -q "clock:.*WARNING.*ahead of" "$ROOT/skew.out"
+laptop work remote >/dev/null 2>&1 || fail "work remote"
+agent_kill
+AGENT_ENV='' agent_up
+check "acknowledged checkpoints intact" acked_invariant
 as_server "$BIN" doctor --data "$DATA" --helper-socket "$SOCK" >"$ROOT/doctor-clock.out" 2>&1 || true
 check "doctor checks the server's clock" grep -q "clock" "$ROOT/doctor-clock.out"
 

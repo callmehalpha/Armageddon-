@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/callmehalpha/Armageddon-/internal/faults"
 	"github.com/callmehalpha/Armageddon-/internal/identity"
 	"github.com/callmehalpha/Armageddon-/internal/tlsedge"
 )
@@ -307,7 +308,7 @@ func (c *Client) noteDate(resp *http.Response) {
 		return
 	}
 	c.mu.Lock()
-	c.skew = time.Since(d).Round(time.Second)
+	c.skew = faults.Now().Sub(d).Round(time.Second)
 	c.mu.Unlock()
 }
 
